@@ -15,6 +15,10 @@ CONFIG_FILE = 'hospital_config.json'
 HISTORY_FILE = 'room_history.json'
 PRIVATE_CALENDAR_URL = "https://calendar.google.com/calendar/ical/fntnonk%40gmail.com/private-e8ce4e0639a626387fff827edd26b87f/basic.ics"
 
+# Názvy súborov pre Gist úložisko
+GIST_FILENAME_CONFIG = "hospital_config_v2.json"
+GIST_FILENAME_HISTORY = "room_history_v2.json"
+
 # Definícia izieb (Číslo, Počet lôžok)
 ROOMS_LIST = [
     (1, 3), (2, 3), (3, 3), (4, 3), (5, 3),
@@ -26,6 +30,74 @@ ROOMS_LIST = [
 # Skúsenejšie lekárky – smer plnenia izieb od 1 nahor
 SENIOR_DOCTORS = ["Kurisova", "Vidulin", "Miklatkova"]
 
+# --- GITHUB GIST STORAGE (ZADARMO) ---
+
+def get_gist_id(filename):
+    """Nájde existujúci Gist s daným súborom."""
+    if "github" not in st.secrets:
+        return None
+    
+    token = st.secrets["github"]["token"]
+    headers = {"Authorization": f"token {token}"}
+    try:
+        resp = requests.get("https://api.github.com/gists", headers=headers)
+        if resp.status_code == 200:
+            for gist in resp.json():
+                if filename in gist['files']:
+                    return gist['id']
+    except Exception:
+        pass
+    return None
+
+def load_data_from_gist(filename):
+    """Načíta JSON dáta z Gistu."""
+    if "github" not in st.secrets:
+        return None
+        
+    try:
+        gist_id = get_gist_id(filename)
+        if not gist_id:
+            return None
+        
+        token = st.secrets["github"]["token"]
+        headers = {"Authorization": f"token {token}"}
+        resp = requests.get(f"https://api.github.com/gists/{gist_id}", headers=headers)
+        if resp.status_code == 200:
+            content = resp.json()['files'][filename]['content']
+            return json.loads(content)
+    except Exception as e:
+        print(f"Gist load error: {e}")
+    return None
+
+def save_data_to_gist(filename, data):
+    """Uloží/Aktualizuje JSON dáta v Giste."""
+    if "github" not in st.secrets:
+        return
+
+    try:
+        token = st.secrets["github"]["token"]
+        headers = {"Authorization": f"token {token}"}
+        gist_id = get_gist_id(filename)
+        
+        payload = {
+            "description": f"Storage for {filename} (Streamlit App)",
+            "public": False,
+            "files": {
+                filename: {
+                    "content": json.dumps(data, ensure_ascii=False, indent=2)
+                }
+            }
+        }
+
+        if gist_id:
+            requests.patch(f"https://api.github.com/gists/{gist_id}", json=payload, headers=headers)
+        else:
+            requests.post("https://api.github.com/gists", json=payload, headers=headers)
+            
+    except Exception as e:
+        st.error(f"Chyba pri ukladaní do Gist ({filename}): {e}")
+
+# --- PÔVODNÉ FUNKCIE + OBALENIE GISTOM ---
 
 def get_default_config():
     return {
@@ -202,7 +274,6 @@ def get_default_config():
         }
     }
 
-
 def migrate_homolova_to_vidulin(config):
     changed = False
     if "Homolova" in config["lekari"]:
@@ -226,46 +297,66 @@ def migrate_homolova_to_vidulin(config):
                     changed = True
     return config, changed
 
-
 def load_config():
+    # 1. Skúsime Gist (Iba ak máme kľúče - na webe)
+    gist_data = load_data_from_gist(GIST_FILENAME_CONFIG)
+    
+    # --- OPRAVENÝ RIADOK (gist_ -> gist_data) ---
+    if gist_
+        data, changed = migrate_homolova_to_vidulin(gist_data)
+        if changed: 
+            save_config(data)
+        return data
+    
+    # 2. Lokálny súbor (Fallback pre lokálny beh)
     if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-            config = json.load(f)
-        config, changed = migrate_homolova_to_vidulin(config)
-        if changed:
-            save_config(config)
-        return config
+        try:
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            config, changed = migrate_homolova_to_vidulin(config)
+            if changed: 
+                save_config(config)
+            return config
+        except: 
+            pass
+        
+    # 3. Default
     return get_default_config()
 
-
 def save_config(config):
+    # Lokálne
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
         json.dump(config, f, ensure_ascii=False, indent=2)
-
-
-# --- HISTORY ---
+    # Gist
+    save_data_to_gist(GIST_FILENAME_CONFIG, config)
 
 def load_history():
+    # 1. Gist
+    gist_data = load_data_from_gist(GIST_FILENAME_HISTORY)
+    if gist_ return gist_data
+    
+    # 2. Lokálne
     if os.path.exists(HISTORY_FILE):
         try:
             with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
                 return json.load(f)
-        except Exception:
-            return {}
+        except: return {}
     return {}
 
 def save_history(history):
+    # Lokálne
     with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
         json.dump(history, f, ensure_ascii=False, indent=2)
+    # Gist
+    save_data_to_gist(GIST_FILENAME_HISTORY, history)
 
-# --- HIERARCHICKÉ ROZDEĽOVANIE IZIEB ---
+# --- HIERARCHICKÉ ROZDEĽOVANIE IZIEB (UPDATED) ---
 
 def distribute_rooms(doctors_list, wolf_doc_name,
                      previous_assignments=None, manual_core=None):
     """
-    Upravené: Priorita SPRAVODLIVOSŤ pred GEOGRAFIOU.
-    Snaží sa nájsť izbu, ktorá najlepšie doplní lekára do ideálneho počtu,
-    aj keď to naruší súvislosť rajónu.
+    Priorita SPRAVODLIVOSŤ (Fairness) pred GEOGRAFIOU.
+    Snaží sa nájsť izbu, ktorá najlepšie doplní lekára do ideálneho počtu lôžok.
     """
     if not doctors_list:
         return {}, {}
@@ -295,7 +386,6 @@ def distribute_rooms(doctors_list, wolf_doc_name,
     if deputy_doc:
         caps[deputy_doc] = 6
     if rt_help_doc:
-        # Miklatkova má mať menej, ale ak je málo ľudí, musí zabrať
         if num_workers >= 4: caps[rt_help_doc] = 9
         elif num_workers == 3: caps[rt_help_doc] = 12
         else: caps[rt_help_doc] = 15
@@ -312,7 +402,6 @@ def distribute_rooms(doctors_list, wolf_doc_name,
         for num in nums:
             r_obj = next((r for r in available_rooms if r[0] == num), None)
             if not r_obj: continue
-            # Tu ignorujeme limit, lebo je to manuálny príkaz
             assignment[doc].append(r_obj)
             current_beds[doc] += r_obj[1]
             available_rooms.remove(r_obj)
@@ -337,7 +426,6 @@ def distribute_rooms(doctors_list, wolf_doc_name,
                         my_hist_rooms.append(r_obj)
                 
                 my_hist_rooms.sort(key=lambda x: x[0])
-
                 is_senior = (doc in SENIOR_DOCTORS) or (doc == deputy_doc)
                 
                 temp_beds = sum(r[1] for r in my_hist_rooms)
@@ -362,15 +450,15 @@ def distribute_rooms(doctors_list, wolf_doc_name,
             target_doc = head_doc if (head_doc and head_doc not in active_assignees) else active_assignees[0]
             candidates = [target_doc]
 
-        # Kto má najmenej lôžok?
+        # Vyberieme toho, kto má najmenej lôžok
         candidates.sort(key=lambda w: current_beds[w])
         target_doc = candidates[0]
         
         doc_cap = caps.get(target_doc, 15)
         deficit = doc_cap - current_beds[target_doc]
-        
         is_senior = (target_doc in SENIOR_DOCTORS)
         
+        # Skórovacia funkcia izby
         def room_score(r):
             fits = 1 if r[1] <= deficit else 0 
             size_diff = abs(deficit - r[1])
@@ -382,7 +470,7 @@ def distribute_rooms(doctors_list, wolf_doc_name,
             else:
                 dist = r[0] if is_senior else (20 - r[0])
             
-            # Priority: 1. Zmestí sa, 2. Veľkosť, 3. Geografia (slabšia)
+            # Priority: 1. Zmestí sa do limitu, 2. Veľkosť (čo najblizsie deficitu), 3. Geografia
             return (fits, -size_diff, -dist)
         
         available_rooms.sort(key=room_score, reverse=True)
@@ -415,10 +503,6 @@ def distribute_rooms(doctors_list, wolf_doc_name,
 # --- DATA PROCESSING ---
 
 def get_ical_events(start_date, end_date):
-    """
-    Upravené parsovanie mien:
-    Hľadá pripony 'S', 'PN', 'VZ' na konci reťazca (zlepene s menom).
-    """
     try:
         response = requests.get(PRIVATE_CALENDAR_URL)
         response.raise_for_status()
@@ -434,13 +518,14 @@ def get_ical_events(start_date, end_date):
             name = raw
             typ = "Dovolenka"
 
+            # Robust suffix parsing (e.g. "MartinkaS", "HunakovaPN")
             if raw.endswith('PN'):
                 typ = "PN"
                 name = raw[:-2].rstrip(' -')
             elif raw.endswith('VZ'):
                 typ = "Vzdelávanie"
                 name = raw[:-2].rstrip(' -')
-            elif raw.endswith('S'):
+            elif raw.endswith('S') and not raw.endswith('OS'): # Check aby to nebralo mená končiace na OS
                 typ = "Stáž"
                 name = raw[:-1].rstrip(' -')
             elif '-' in raw and typ == "Dovolenka":
@@ -727,7 +812,7 @@ def create_excel_report(dates, data_grid, all_doctors, motto, config):
 # --- UI ---
 
 st.set_page_config(page_title="Rozpis FN Trenčín", layout="wide")
-st.title("🏥 Rozpis služieb - Onkologická klinika FN Trenčín")
+st.title("🏥 Rozpis prác - Onkologická klinika FN Trenčín")
 
 if 'config' not in st.session_state:
     st.session_state.config = load_config()
@@ -786,6 +871,9 @@ if mode == "🚀 Generovať rozpis":
         if st.button("🗑️ Vymazať históriu izieb"):
             if os.path.exists(HISTORY_FILE):
                 os.remove(HISTORY_FILE)
+                if "github" in st.secrets:
+                     # Gist mazanie je komplikovane, radsej ulozime prazdne
+                     save_data_to_gist(GIST_FILENAME_HISTORY, {})
             st.success("História vymazaná.")
 
     if gen_btn:
