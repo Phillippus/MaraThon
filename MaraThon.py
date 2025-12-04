@@ -301,7 +301,7 @@ def load_config():
     # 1. Skúsime Gist (Iba ak máme kľúče - na webe)
     gist_data = load_data_from_gist(GIST_FILENAME_CONFIG)
     
-    # --- OPRAVENÝ RIADOK (gist_ -> gist_data) ---
+    # --- OPRAVA ---
     if gist_
         data, changed = migrate_homolova_to_vidulin(gist_data)
         if changed: 
@@ -333,7 +333,8 @@ def save_config(config):
 def load_history():
     # 1. Gist
     gist_data = load_data_from_gist(GIST_FILENAME_HISTORY)
-    if gist_ return gist_data
+    if gist_
+        return gist_data
     
     # 2. Lokálne
     if os.path.exists(HISTORY_FILE):
