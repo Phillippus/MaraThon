@@ -3,3 +3,4 @@ pandas
 requests
 ics
 openpyxl
+reportlab
