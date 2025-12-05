@@ -120,6 +120,12 @@ def load_config():
     """Nová, jednoduchšia funkcia na načítanie konfigurácie."""
     config = _load_data(GIST_FILENAME_CONFIG, CONFIG_FILE, get_default_config)
     config, changed = migrate_homolova_to_vidulin(config)
+    
+    # Inicializácia sekcie pre výnimky, ak chýba
+    if 'closures' not in config:
+        config['closures'] = {}
+        changed = True
+        
     if changed:
         save_config(config)
     return config
@@ -153,6 +159,7 @@ def save_history(history):
 def get_default_config():
     return {
         "total_beds": 42,
+        "closures": {}, # { "YYYY-MM-DD": ["Prijmova", "ODDELENIE"] }
         "ambulancie": {
             "Prijmova": {
                 "dni": ["Pondelok", "Utorok", "Streda", "Stvrtok", "Piatok"],
@@ -476,6 +483,8 @@ def generate_data_structure(config, absences, start_date):
     last_day_assignments = history.get(day_before_str, {})
     manual_all = st.session_state.get("manual_core", {})
     
+    closures = config.get('closures', {})
+    
     for i in range(7):
         curr_date = thursday + timedelta(days=i)
         day_name = days_map.get(curr_date.weekday())
@@ -486,6 +495,8 @@ def generate_data_structure(config, absences, start_date):
         dates.append(date_str)
         
         day_absences = absences.get(date_key, {})
+        closed_today = closures.get(date_key, [])
+        
         data_grid[date_str] = {}
 
         available = [d for d in all_doctors if d not in day_absences and day_name not in config['lekari'][d].get('nepracuje', [])]
@@ -495,7 +506,11 @@ def generate_data_structure(config, absences, start_date):
         for doc in list(available):
             if fixed := config['lekari'][doc].get('pevne_dni', {}).get(day_name):
                 for t in [t.strip() for t in fixed.split(',')]:
-                    assigned_amb[t] = doc
+                    # Ak je ambulancia dnes zatvorená manuálne, preskoč pridelenie
+                    if t in closed_today:
+                        assigned_amb[t] = "ZATVORENÉ"
+                    else:
+                        assigned_amb[t] = doc
                 available.remove(doc)
 
         # 2. Poradie obsadzovania ambulancií
@@ -503,6 +518,12 @@ def generate_data_structure(config, absences, start_date):
 
         for amb_name in processing_order:
             if amb_name in assigned_amb: continue
+            
+            # SKONTROLUJEME, ČI JE AMBULANCIA MANUÁLNE ZATVORENÁ
+            if amb_name in closed_today:
+                assigned_amb[amb_name] = "ZATVORENÉ"
+                continue
+
             amb_info = config['ambulancie'][amb_name]
             if day_name not in amb_info['dni']:
                 assigned_amb[amb_name] = "---"; continue
@@ -525,18 +546,27 @@ def generate_data_structure(config, absences, start_date):
         
         for amb, val in assigned_amb.items(): data_grid[date_str][amb] = val
 
-        # 3. Izby a Wolf (zvyšok lekárov)
-        wolf_doc = assigned_amb.get("Wolf")
-        ward_candidates = [d for d in available if "Oddelenie" in config['lekari'][d].get('moze', [])]
-        
-        if wolf_doc and wolf_doc not in ward_candidates and "Oddelenie" in config['lekari'].get(wolf_doc, {}).get('moze', []):
-             ward_candidates.append(wolf_doc)
-        
-        manual_for_day = manual_all.get(start_date.strftime('%Y-%m-%d'), {})
-        room_text_map, room_raw_map = distribute_rooms(ward_candidates, wolf_doc, last_day_assignments, manual_for_day)
-        
-        last_day_assignments = room_raw_map
-        history[date_key] = room_raw_map
+        # 3. Izby a Wolf
+        # SKONTROLUJEME, ČI JE ZATVORENÉ CELÉ ODDELENIE
+        if "ODDELENIE (Celé)" in closed_today:
+            room_text_map, room_raw_map = {}, {}
+            # Všetci, čo zostali voľní pre oddelenie, dostanú info "ZATVORENÉ"
+            for doc in all_doctors:
+                 # Ak nemá prácu na ambulancii
+                 if doc not in assigned_amb.values() and doc not in day_absences:
+                     room_text_map[doc] = "ZATVORENÉ"
+        else:
+            wolf_doc = assigned_amb.get("Wolf")
+            ward_candidates = [d for d in available if "Oddelenie" in config['lekari'][d].get('moze', [])]
+            
+            if wolf_doc and wolf_doc not in ward_candidates and "Oddelenie" in config['lekari'].get(wolf_doc, {}).get('moze', []):
+                 ward_candidates.append(wolf_doc)
+            
+            manual_for_day = manual_all.get(start_date.strftime('%Y-%m-%d'), {})
+            room_text_map, room_raw_map = distribute_rooms(ward_candidates, wolf_doc, last_day_assignments, manual_for_day)
+            
+            last_day_assignments = room_raw_map
+            history[date_key] = room_raw_map
 
         for doc in all_doctors:
             if doc in day_absences: data_grid[date_str][doc] = day_absences[doc]
@@ -552,9 +582,23 @@ def create_display_df(dates, data_grid, all_doctors, motto, config):
     rows = []
     ward_doctors = [d for d in all_doctors if "Oddelenie" in config['lekari'][d].get('moze', [])]
     
+    # Premenovanie pre zobrazenie (interný kľúč -> pekný názov)
+    display_map = {
+        "Radio 2A": "RT ambulancia",
+        "Velka dispenzarna": "veľký dispenzár",
+        "Mala dispenzarna": "malý dispenzár"
+    }
+
     rows.append(["Oddelenie"] + dates)
     for doc in ward_doctors:
-        rows.append([f"Dr {doc}"] + [data_grid[date].get(doc, "").replace("Velka dispenzarna", "veľký disp.").replace("Mala dispenzarna", "malý disp.") for date in dates])
+        # Aplikujeme premenovanie aj v obsahu buniek (ak je lekár pridelený tam)
+        vals = []
+        for date in dates:
+            val = data_grid[date].get(doc, "")
+            for old, new in display_map.items():
+                val = val.replace(old, new)
+            vals.append(val)
+        rows.append([f"Dr {doc}"] + vals)
     rows.append([motto or "Motto"] + [""] * len(dates))
 
     sections = [
@@ -564,10 +608,17 @@ def create_display_df(dates, data_grid, all_doctors, motto, config):
         ("Disp. Ambulancia", ["Velka dispenzarna", "Mala dispenzarna"]),
         ("RTG Terapia", ["Wolf"])
     ]
+    
     for title, amb_list in sections:
         rows.append([title] + dates)
         for amb in amb_list:
-            rows.append([amb] + [data_grid[date].get(amb, "").replace("---", "").replace("NEOBSADENÉ", "???") for date in dates])
+            display_name = display_map.get(amb, amb) # Premenovanie riadku
+            vals = []
+            for date in dates:
+                val = data_grid[date].get(amb, "")
+                val = val.replace("---", "").replace("NEOBSADENÉ", "???")
+                vals.append(val)
+            rows.append([display_name] + vals)
         rows.append([""] * (len(dates) + 1))
         
     return pd.DataFrame(rows)
@@ -624,6 +675,39 @@ if mode == "🚀 Generovať rozpis":
     c1, c2 = st.columns([2, 2])
     st.session_state.motto = c1.text_input("📢 Motto týždňa (nepovinné):", placeholder="Sem napíšte motto...")
     start_d = c2.date_input("Začiatok rozpisu (vypočíta najbližší štvrtok):", datetime.now())
+
+    # --- SEKCIA VÝNIMIEK (ZATVORENÉ AMBULANCIE) ---
+    with st.expander("📅 Výnimky a zatváranie ambulancií (Manuálne)"):
+        st.info("Tu môžete nastaviť dni, kedy je konkrétna ambulancia (alebo celé oddelenie) zatvorená.")
+        
+        c_ex1, c_ex2, c_ex3 = st.columns([1, 2, 1])
+        ex_date = c_ex1.date_input("Dátum výnimky:", start_d)
+        ex_date_str = ex_date.strftime('%Y-%m-%d')
+        
+        # Možnosti: Všetky amb + špeciálna možnosť pre celé oddelenie
+        amb_options = ["ODDELENIE (Celé)"] + list(st.session_state.config['ambulancie'].keys())
+        
+        current_closures = st.session_state.config.get('closures', {}).get(ex_date_str, [])
+        
+        selected_closures = c_ex2.multiselect(
+            "Vyberte, čo je v tento deň ZATVORENÉ:",
+            options=amb_options,
+            default=current_closures
+        )
+        
+        if c_ex3.button("💾 Uložiť výnimku"):
+            if 'closures' not in st.session_state.config:
+                st.session_state.config['closures'] = {}
+            
+            if selected_closures:
+                st.session_state.config['closures'][ex_date_str] = selected_closures
+            else:
+                # Ak je zoznam prázdny, vymažeme kľúč pre tento dátum
+                if ex_date_str in st.session_state.config['closures']:
+                    del st.session_state.config['closures'][ex_date_str]
+            
+            save_config(st.session_state.config)
+            st.success(f"Výnimky pre {ex_date.strftime('%d.%m.%Y')} uložené.")
 
     st.markdown("### Manuálne pridelenie izieb")
     manual_core_input = {}
