@@ -491,13 +491,14 @@ def generate_data_structure(config, absences, start_date):
         available = [d for d in all_doctors if d not in day_absences and day_name not in config['lekari'][d].get('nepracuje', [])]
         assigned_amb = {}
 
-        # Pevné dni
+        # 1. Pevné dni (najvyššia priorita)
         for doc in list(available):
             if fixed := config['lekari'][doc].get('pevne_dni', {}).get(day_name):
                 for t in [t.strip() for t in fixed.split(',')]:
                     assigned_amb[t] = doc
                 available.remove(doc)
 
+        # 2. Poradie obsadzovania ambulancií
         processing_order = ["Radio 2A", "Radio 2B", "Chemo 8B", "Chemo 8A", "Chemo 8C", "Wolf", "Prijmova", "Velka dispenzarna", "Mala dispenzarna"]
 
         for amb_name in processing_order:
@@ -507,8 +508,6 @@ def generate_data_structure(config, absences, start_date):
                 assigned_amb[amb_name] = "---"; continue
             
             # Špeciálne pravidlá
-            if amb_name == "Radio 2A" and "Zavrelova" not in available and "Martinka" in day_absences:
-                assigned_amb[amb_name] = "Amb. zatvorená"; continue
             if amb_name == "Radio 2B" and "Martinka" not in available:
                 assigned_amb[amb_name] = "ZATVORENÉ"; continue
 
@@ -526,8 +525,10 @@ def generate_data_structure(config, absences, start_date):
         
         for amb, val in assigned_amb.items(): data_grid[date_str][amb] = val
 
+        # 3. Izby a Wolf (zvyšok lekárov)
         wolf_doc = assigned_amb.get("Wolf")
         ward_candidates = [d for d in available if "Oddelenie" in config['lekari'][d].get('moze', [])]
+        
         if wolf_doc and wolf_doc not in ward_candidates and "Oddelenie" in config['lekari'].get(wolf_doc, {}).get('moze', []):
              ward_candidates.append(wolf_doc)
         
