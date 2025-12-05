@@ -598,7 +598,7 @@ def create_display_df(dates, data_grid, all_doctors, motto, config):
     ward_doctors = [d for d in all_doctors if "Oddelenie" in config['lekari'][d].get('moze', [])]
     
     display_map = {
-        "Radio 2A": "RT ambulancia",
+        "Radio 2A": "Radio 2A",
         "Velka dispenzarna": "veľký dispenzár",
         "Mala dispenzarna": "malý dispenzár"
     }
