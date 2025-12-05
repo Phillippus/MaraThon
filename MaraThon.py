@@ -15,11 +15,10 @@ CONFIG_FILE = 'hospital_config.json'
 HISTORY_FILE = 'room_history.json'
 PRIVATE_CALENDAR_URL = "https://calendar.google.com/calendar/ical/fntnonk%40gmail.com/private-e8ce4e0639a626387fff827edd26b87f/basic.ics"
 
-# Názvy súborov pre Gist úložisko
-GIST_FILENAME_CONFIG = "hospital_config_v2.json"
-GIST_FILENAME_HISTORY = "room_history_v2.json"
+# ZMENA VERZIE NA v5 (Špeciálna logika pre Španika: Wolf + Malý disp.)
+GIST_FILENAME_CONFIG = "hospital_config_v5.json"
+GIST_FILENAME_HISTORY = "room_history_v5.json"
 
-# Definícia izieb (Číslo, Počet lôžok)
 ROOMS_LIST = [
     (1, 3), (2, 3), (3, 3), (4, 3), (5, 3),
     (7, 1), (8, 3), (9, 3), (10, 1), (11, 1),
@@ -27,16 +26,13 @@ ROOMS_LIST = [
     (18, 3), (19, 3)
 ]
 
-# Skúsenejšie lekárky – smer plnenia izieb od 1 nahor
 SENIOR_DOCTORS = ["Kurisova", "Vidulin", "Miklatkova"]
 
-# --- NOVÁ, ZJEDNODUŠENÁ LOGIKA UKLADANIA A NAČÍTANIA ---
+# --- GIST ULOŽISKO ---
 
 def get_gist_id(filename):
-    """Nájde existujúci Gist s daným súborom."""
     if "github" not in st.secrets:
         return None
-    
     token = st.secrets["github"]["token"]
     headers = {"Authorization": f"token {token}"}
     try:
@@ -50,14 +46,11 @@ def get_gist_id(filename):
     return None
 
 def load_data_from_gist(filename):
-    """Načíta JSON dáta z Gistu, vráti None pri chybe."""
     if "github" not in st.secrets:
         return None
-        
     gist_id = get_gist_id(filename)
     if not gist_id:
         return None
-        
     try:
         token = st.secrets["github"]["token"]
         headers = {"Authorization": f"token {token}"}
@@ -65,20 +58,16 @@ def load_data_from_gist(filename):
         resp.raise_for_status()
         content = resp.json()['files'][filename]['content']
         return json.loads(content)
-    except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
-        print(f"Gist load error: {e}")
-    return None
+    except (requests.exceptions.RequestException, json.JSONDecodeError):
+        return None
 
 def save_data_to_gist(filename, data):
-    """Uloží/Aktualizuje JSON dáta v Giste."""
     if "github" not in st.secrets:
         return
-
     try:
         token = st.secrets["github"]["token"]
         headers = {"Authorization": f"token {token}"}
         gist_id = get_gist_id(filename)
-        
         payload = {
             "description": f"Storage for {filename} (Streamlit App)",
             "public": False,
@@ -86,79 +75,59 @@ def save_data_to_gist(filename, data):
                 filename: {"content": json.dumps(data, ensure_ascii=False, indent=2)}
             }
         }
-        
         if gist_id:
             response = requests.patch(f"https://api.github.com/gists/{gist_id}", json=payload, headers=headers)
         else:
             response = requests.post("https://api.github.com/gists", json=payload, headers=headers)
         response.raise_for_status()
-            
     except requests.exceptions.RequestException as e:
         st.error(f"Chyba pri ukladaní do Gist ({filename}): {e}")
 
 def _load_data(gist_filename, local_filename, default_factory):
-    """
-    Nová pomocná funkcia. Skúsi načítať dáta v poradí:
-    1. Gist
-    2. Lokálny súbor
-    3. Ak všetko zlyhá, vráti default hodnotu.
-    """
     data = load_data_from_gist(gist_filename)
     if data is not None:
         return data
-
     if os.path.exists(local_filename):
         try:
             with open(local_filename, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except (IOError, json.JSONDecodeError):
             pass
-
     return default_factory()
 
 def load_config():
-    """Nová, jednoduchšia funkcia na načítanie konfigurácie."""
     config = _load_data(GIST_FILENAME_CONFIG, CONFIG_FILE, get_default_config)
     config, changed = migrate_homolova_to_vidulin(config)
-    
     if 'closures' not in config:
         config['closures'] = {}
         changed = True
-        
     if changed:
         save_config(config)
     return config
 
 def load_history():
-    """Nová, jednoduchšia funkcia na načítanie histórie."""
     return _load_data(GIST_FILENAME_HISTORY, HISTORY_FILE, lambda: {})
 
 def save_config(config):
-    """Uloží config lokálne a potom skúsi uložiť aj na Gist."""
     try:
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
             json.dump(config, f, ensure_ascii=False, indent=2)
     except IOError as e:
         st.error(f"Chyba pri lokálnom ukladaní configu: {e}")
-        
     save_data_to_gist(GIST_FILENAME_CONFIG, config)
 
 def save_history(history):
-    """Uloží históriu lokálne a potom skúsi uložiť aj na Gist."""
     try:
         with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
             json.dump(history, f, ensure_ascii=False, indent=2)
     except IOError as e:
         st.error(f"Chyba pri lokálnom ukladaní histórie: {e}")
-
     save_data_to_gist(GIST_FILENAME_HISTORY, history)
-
-# --- KONIEC NOVEJ LOGIKY ---
 
 def get_default_config():
     return {
         "total_beds": 42,
-        "closures": {}, 
+        "closures": {},
         "ambulancie": {
             "Prijmova": {
                 "dni": ["Pondelok", "Utorok", "Streda", "Stvrtok", "Piatok"],
@@ -289,8 +258,11 @@ def get_default_config():
             "Spanik": {
                 "moze": ["Wolf", "Mala dispenzarna"],
                 "pevne_dni": {
-                    "Pondelok": "Mala dispenzarna", "Piatok": "Mala dispenzarna",
-                    "Utorok": "Wolf", "Streda": "Wolf", "Stvrtok": "Wolf"
+                    "Pondelok": "Mala dispenzarna", # V Po/Pi má primárne Malý disp., Wolf sa mu "prilepí" v kóde
+                    "Utorok": "Wolf", 
+                    "Streda": "Wolf", 
+                    "Stvrtok": "Wolf",
+                    "Piatok": "Mala dispenzarna"
                 }, "active": True
             },
             "Kacurova": {"moze": ["Oddelenie"], "active": True},
@@ -315,10 +287,9 @@ def migrate_homolova_to_vidulin(config):
                     changed = True
     return config, changed
 
-# --- HIERARCHICKÉ ROZDEĽOVANIE IZIEB (UPDATED) ---
+# --- HIERARCHICKÉ ROZDEĽOVANIE IZIEB ---
 
-def distribute_rooms(doctors_list, wolf_doc_name,
-                     previous_assignments=None, manual_core=None):
+def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, manual_core=None):
     if not doctors_list:
         return {}, {}
     if manual_core is None:
@@ -391,7 +362,7 @@ def distribute_rooms(doctors_list, wolf_doc_name,
         candidates = [d for d in active_assignees if current_beds[d] < caps.get(d, 15)]
         if not candidates:
             target_doc = head_doc if (head_doc and head_doc not in active_assignees) else (active_assignees[0] if active_assignees else None)
-            if not target_doc: break # No one to assign to
+            if not target_doc: break
             candidates = [target_doc]
 
         candidates.sort(key=lambda w: current_beds[w])
@@ -515,7 +486,21 @@ def generate_data_structure(config, absences, start_date):
         processing_order = ["Radio 2A", "Radio 2B", "Chemo 8B", "Chemo 8A", "Chemo 8C", "Wolf", "Prijmova", "Velka dispenzarna", "Mala dispenzarna"]
 
         for amb_name in processing_order:
-            if amb_name in assigned_amb: continue
+            # ŠPECIÁLNA LOGIKA PRE WOLF A ŠPÁNIKA:
+            # Ak je to Wolf a Španik je už priradený na Malú dispenzárnu (z pevných dní),
+            # tak mu priradíme AJ Wolf.
+            if amb_name == "Wolf":
+                if "Spanik" in all_doctors and "Spanik" not in day_absences:
+                    # Ak má Španik už Malú dispenzárnu (Po/Pi), priradíme mu aj Wolf
+                    if assigned_amb.get("Mala dispenzarna") == "Spanik":
+                        assigned_amb["Wolf"] = "Spanik"
+                        continue # Wolf vybavený, ideme ďalej
+                    
+                    # Ak je voľný (Ut-Štv), vezme ho cez pevné dni (už spracované vyššie), 
+                    # alebo cez prioritu nižšie.
+
+            if amb_name in assigned_amb: 
+                continue
             
             if amb_name in closed_today:
                 assigned_amb[amb_name] = "ZATVORENÉ"
@@ -523,10 +508,12 @@ def generate_data_structure(config, absences, start_date):
 
             amb_info = config['ambulancie'][amb_name]
             if day_name not in amb_info['dni']:
-                assigned_amb[amb_name] = "---"; continue
+                assigned_amb[amb_name] = "---"
+                continue
             
             if amb_name == "Radio 2B" and "Martinka" not in available:
-                assigned_amb[amb_name] = "ZATVORENÉ"; continue
+                assigned_amb[amb_name] = "ZATVORENÉ"
+                continue
 
             prio_list = amb_info['priority']
             if isinstance(prio_list, dict):
@@ -540,48 +527,46 @@ def generate_data_structure(config, absences, start_date):
             if amb_name not in assigned_amb:
                 assigned_amb[amb_name] = "NEOBSADENÉ"
         
-        for amb, val in assigned_amb.items(): data_grid[date_str][amb] = val
+        for amb, val in assigned_amb.items(): 
+            data_grid[date_str][amb] = val
 
         # 3. Izby a Wolf
-                # 3. Izby a Wolf
+        wolf_doc = assigned_amb.get("Wolf")
+        
         if "ODDELENIE (Celé)" in closed_today:
-            # Oddelenie je zatvorené: nerozdeľujeme izby vôbec
             room_text_map, room_raw_map = {}, {}
-
-            # Wolf je samostatná ambulancia – môže fungovať aj pri zatvorenom oddelení
-            wolf_doc = assigned_amb.get("Wolf")
-
-            # Všetkým lekárom, ktorí by pracovali na oddelení (a nie sú PN/dovolenka
-            # a nemajú inú ambulanciu), napíšeme "ZATVORENÉ"
             for doc in all_doctors:
                 if doc in day_absences:
                     continue
-                # ak je lekár už priradený na nejakú ambulanciu (vrátane Wolf), nechaj ho tak
+                # Ak už má ambulanciu (vrátane Wolf/Mala disp), preskočíme
                 if doc in assigned_amb.values():
                     continue
                 if "Oddelenie" in config['lekari'][doc].get('moze', []):
                     room_text_map[doc] = "ZATVORENÉ"
-
         else:
-            wolf_doc = assigned_amb.get("Wolf")
             ward_candidates = [d for d in available if "Oddelenie" in config['lekari'][d].get('moze', [])]
-
-            # Lekár na Wolfovi môže mať zároveň izby (limit 12 lôžok)
             if wolf_doc and wolf_doc not in ward_candidates and "Oddelenie" in config['lekari'].get(wolf_doc, {}).get('moze', []):
                 ward_candidates.append(wolf_doc)
-
+            
             manual_for_day = manual_all.get(start_date.strftime('%Y-%m-%d'), {})
-            room_text_map, room_raw_map = distribute_rooms(
-                ward_candidates, wolf_doc, last_day_assignments, manual_for_day
-            )
+            room_text_map, room_raw_map = distribute_rooms(ward_candidates, wolf_doc, last_day_assignments, manual_for_day)
+            
             last_day_assignments = room_raw_map
             history[date_key] = room_raw_map
 
-
+        # 4. Finálne pridelenie
         for doc in all_doctors:
-            if doc in day_absences: data_grid[date_str][doc] = day_absences[doc]
-            elif doc in room_text_map: data_grid[date_str][doc] = room_text_map[doc]
-            else: data_grid[date_str][doc] = " + ".join([a for a, d in assigned_amb.items() if d == doc]) or ""
+            if doc in day_absences: 
+                data_grid[date_str][doc] = day_absences[doc]
+            elif doc in room_text_map: 
+                data_grid[date_str][doc] = room_text_map[doc]
+            else: 
+                # Zobrazíme všetky ambulancie, ktoré má lekár v tento deň
+                my_ambs = [a for a, d in assigned_amb.items() if d == doc]
+                if my_ambs:
+                    data_grid[date_str][doc] = " + ".join(my_ambs)
+                else:
+                    data_grid[date_str][doc] = ""
 
     save_history(history)
     return dates, data_grid, all_doctors
@@ -653,7 +638,8 @@ def create_excel_report(df):
                 cell = ws.cell(row=r_idx, column=c_idx, value=value)
                 cell.border = thin_border
                 cell.alignment = center_align
-                if is_header or (c_idx==1 and not is_motto): cell.font = bold_font
+                if is_header or (c_idx==1 and not is_motto): 
+                    cell.font = bold_font
                 if is_motto:
                     ws.merge_cells(start_row=r_idx, start_column=1, end_row=r_idx, end_column=len(df.columns))
                     cell.font = Font(bold=True, italic=True)
@@ -683,21 +669,16 @@ if mode == "🚀 Generovať rozpis":
     st.session_state.motto = c1.text_input("📢 Motto týždňa (nepovinné):", placeholder="Sem napíšte motto...")
     start_d = c2.date_input("Začiatok rozpisu (vypočíta najbližší štvrtok):", datetime.now())
 
-    # --- SEKCIA VÝNIMIEK (ZATVORENÉ AMBULANCIE) - ROZSAH ---
     with st.expander("📅 Výnimky a zatváranie ambulancií (Manuálne)"):
         st.info("Vyberte rozsah dátumov (napr. Vianoce) a čo má byť zatvorené. Ak necháte výber prázdny a uložíte, výnimky sa pre dané dni zrušia.")
-        
         c_ex1, c_ex2, c_ex3 = st.columns([1, 2, 1])
         
-        # Dátumový rozsah
         d_range = c_ex1.date_input(
             "Rozsah dátumov (Od - Do):",
             value=[],
             help="Kliknite najprv na dátum začiatku, potom na dátum konca."
         )
-        
         amb_options = ["ODDELENIE (Celé)"] + list(st.session_state.config['ambulancie'].keys())
-        
         selected_closures = c_ex2.multiselect(
             "Čo má byť v tomto období ZATVORENÉ?",
             options=amb_options
@@ -716,15 +697,12 @@ if mode == "🚀 Generovať rozpis":
                     if selected_closures:
                         st.session_state.config['closures'][d_key] = selected_closures
                     else:
-                        # Ak je prázdny výber -> mažeme výnimku
                         if d_key in st.session_state.config['closures']:
                             del st.session_state.config['closures'][d_key]
                     curr += timedelta(days=1)
                     cnt += 1
-                
                 save_config(st.session_state.config)
                 st.success(f"Nastavenia aplikované na {cnt} dní.")
-                
             elif len(d_range) == 1:
                 d_key = d_range[0].strftime('%Y-%m-%d')
                 if selected_closures:
@@ -743,9 +721,11 @@ if mode == "🚀 Generovať rozpis":
     cols = st.columns(2)
     for i, doc in enumerate(ward_docs):
         txt = cols[i % 2].text_input(f"Dr {doc} – izby (oddelené čiarkou)", key=f"core_{doc}")
-        if txt.strip(): manual_core_input[doc] = [int(p.strip()) for p in txt.split(',') if p.strip().isdigit()]
+        if txt.strip(): 
+            manual_core_input[doc] = [int(p.strip()) for p in txt.split(',') if p.strip().isdigit()]
     
-    if manual_core_input: st.session_state.manual_core[start_d.strftime('%Y-%m-%d')] = manual_core_input
+    if manual_core_input: 
+        st.session_state.manual_core[start_d.strftime('%Y-%m-%d')] = manual_core_input
 
     c3, c4 = st.columns([1, 1])
     if c3.button("🚀 Generovať nový rozpis", type="primary"):
@@ -755,14 +735,15 @@ if mode == "🚀 Generovať rozpis":
             dates, grid, docs = generate_data_structure(st.session_state.config, absences, start_d)
             
             df_display = create_display_df(dates, grid, docs, st.session_state.motto, st.session_state.config)
-            df_display.columns = ["Sekcia / Dátum"] + dates 
+            df_display.columns = ["Sekcia / Dátum"] + dates
             st.session_state.df_display = df_display
 
             st.success("✅ Hotovo! Izby sú synchronizované s históriou.")
     
     if c4.button("🗑️ Vymazať históriu izieb"):
         save_history({})
-        if os.path.exists(HISTORY_FILE): os.remove(HISTORY_FILE)
+        if os.path.exists(HISTORY_FILE): 
+            os.remove(HISTORY_FILE)
         st.success("História vymazaná a odoslaná na Gist.")
 
     if 'df_display' in st.session_state:
@@ -783,7 +764,7 @@ elif mode == "⚙️ Nastavenia lekárov":
             st.session_state.config['lekari'][new_doc] = {"moze": ["Oddelenie"], "active": True}
             save_config(st.session_state.config)
             st.success(f"Lekár {new_doc} pridaný")
-            st.experimental_rerun()
+            st.rerun()
 
     for doc, data in st.session_state.config['lekari'].items():
         with st.expander(f"{doc} {'(Neaktívny)' if not data.get('active', True) else ''}"):
@@ -796,12 +777,12 @@ elif mode == "⚙️ Nastavenia lekárov":
                 data['active'] = act
                 data['moze'] = can_do
                 save_config(st.session_state.config)
-                st.experimental_rerun()
+                st.rerun()
             
             if st.button(f"🗑️ Odstrániť {doc}", key=f"del_{doc}"):
                 del st.session_state.config['lekari'][doc]
                 save_config(st.session_state.config)
-                st.experimental_rerun()
+                st.rerun()
     
 elif mode == "🏥 Nastavenia ambulancií":
     st.header("Priority ambulancií")
