@@ -543,23 +543,40 @@ def generate_data_structure(config, absences, start_date):
         for amb, val in assigned_amb.items(): data_grid[date_str][amb] = val
 
         # 3. Izby a Wolf
+                # 3. Izby a Wolf
         if "ODDELENIE (Celé)" in closed_today:
+            # Oddelenie je zatvorené: nerozdeľujeme izby vôbec
             room_text_map, room_raw_map = {}, {}
+
+            # Wolf je samostatná ambulancia – môže fungovať aj pri zatvorenom oddelení
+            wolf_doc = assigned_amb.get("Wolf")
+
+            # Všetkým lekárom, ktorí by pracovali na oddelení (a nie sú PN/dovolenka
+            # a nemajú inú ambulanciu), napíšeme "ZATVORENÉ"
             for doc in all_doctors:
-                 if doc not in assigned_amb.values() and doc not in day_absences:
-                     room_text_map[doc] = "ZATVORENÉ"
+                if doc in day_absences:
+                    continue
+                # ak je lekár už priradený na nejakú ambulanciu (vrátane Wolf), nechaj ho tak
+                if doc in assigned_amb.values():
+                    continue
+                if "Oddelenie" in config['lekari'][doc].get('moze', []):
+                    room_text_map[doc] = "ZATVORENÉ"
+
         else:
             wolf_doc = assigned_amb.get("Wolf")
             ward_candidates = [d for d in available if "Oddelenie" in config['lekari'][d].get('moze', [])]
-            
+
+            # Lekár na Wolfovi môže mať zároveň izby (limit 12 lôžok)
             if wolf_doc and wolf_doc not in ward_candidates and "Oddelenie" in config['lekari'].get(wolf_doc, {}).get('moze', []):
-                 ward_candidates.append(wolf_doc)
-            
+                ward_candidates.append(wolf_doc)
+
             manual_for_day = manual_all.get(start_date.strftime('%Y-%m-%d'), {})
-            room_text_map, room_raw_map = distribute_rooms(ward_candidates, wolf_doc, last_day_assignments, manual_for_day)
-            
+            room_text_map, room_raw_map = distribute_rooms(
+                ward_candidates, wolf_doc, last_day_assignments, manual_for_day
+            )
             last_day_assignments = room_raw_map
             history[date_key] = room_raw_map
+
 
         for doc in all_doctors:
             if doc in day_absences: data_grid[date_str][doc] = day_absences[doc]
