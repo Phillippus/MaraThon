@@ -14,6 +14,7 @@ from email import encoders
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 from openpyxl.utils import get_column_letter
+import unicodedata
 
 # --- REPORTLAB PRE PDF ---
 from reportlab.lib import colors
@@ -416,12 +417,12 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
         result_raw[doc] = [r[0] for r in rooms]
         if not rooms:
             if doc == head_doc and num_workers >= 3:
-                result_text[doc] = "RT oddelenie"
+                result_text[doc] = "RT odd." # ZMENA NA RT odd.
             else:
                 result_text[doc] = "Wolf (0L)" if doc == wolf_doc_name else ""
         else:
             room_str = ", ".join([str(r[0]) for r in rooms])
-            suffix = " + Wolf" if doc == wolf_doc_name else (" + RT oddelenie" if doc == head_doc else "")
+            suffix = " + Wolf" if doc == wolf_doc_name else (" + RT odd." if doc == head_doc else "") # ZMENA NA RT odd.
             result_text[doc] = f"{room_str}{suffix}"
     return result_text, result_raw
 
@@ -671,11 +672,11 @@ def scan_future_problems(config, weeks_ahead=12):
                 if val in ["NEOBSADENÉ", "???", ""] and amb_name not in closed_today and "ODDELENIE (Celé)" not in closed_today:
                     display_map = {
                         "Radio 2A": "RT ambulancia",
-                        "Velka dispenzarna": "veľký dispenzár",
-                        "Mala dispenzarna": "malý dispenzár"
+                        "Velka dispenzarna": "velky dispenzar", # ZMENA: bez diakritiky
+                        "Mala dispenzarna": "maly dispenzar"  # ZMENA: bez diakritiky
                     }
                     display_name = display_map.get(amb_name, amb_name)
-                    problems.append({"Dátum": date_str, "Pracovisko": display_name})
+                    problems.append({"Datum": date_str, "Pracovisko": display_name}) # ZMENA: Datum bez diakritiky
                     
         current += timedelta(weeks=1)
         
@@ -686,8 +687,8 @@ def create_display_df(dates, data_grid, all_doctors, doctors_info, motto, config
     ward_doctors = [d for d in all_doctors if "Oddelenie" in config['lekari'][d].get('moze', [])]
     display_map = {
         "Radio 2A": "RT ambulancia",
-        "Velka dispenzarna": "veľký dispenzár",
-        "Mala dispenzarna": "malý dispenzár"
+        "Velka dispenzarna": "velky dispenzar", # ZMENA: bez diakritiky
+        "Mala dispenzarna": "maly dispenzar"  # ZMENA: bez diakritiky
     }
     
     rows.append(["Oddelenie"] + dates)
@@ -708,7 +709,7 @@ def create_display_df(dates, data_grid, all_doctors, doctors_info, motto, config
     rows.append([motto or "Motto"] + [""] * len(dates))
     
     sections = [
-        ("Konziliárna amb", ["Prijmova"]),
+        ("Konziliarna amb", ["Prijmova"]), # ZMENA: bez diakritiky
         ("RT ambulancie", ["Radio 2A", "Radio 2B"]),
         ("Chemo amb", ["Chemo 8A", "Chemo 8B", "Chemo 8C"]),
         ("Disp. Ambulancia", ["Velka dispenzarna", "Mala dispenzarna"]),
@@ -738,12 +739,12 @@ def create_excel_report(df):
         center_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
         thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
         
-        ws.cell(row=1, column=1, value=f"Rozpis prác Onkologická klinika {df.columns[1]} - {df.columns[-1]}").font = bold_font
+        ws.cell(row=1, column=1, value=f"Rozpis prac Onkologicka klinika {df.columns[1]} - {df.columns[-1]}").font = bold_font # ZMENA: bez diakritiky
         ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(df.columns))
         ws['A1'].alignment = center_align
         
         for r_idx, row in enumerate(df.iterrows(), 2):
-            is_header = row[1][0] in ["Oddelenie", "Konziliárna amb", "RT ambulancie", "Chemo amb", "Disp. Ambulancia", "RTG Terapia"]
+            is_header = row[1][0] in ["Oddelenie", "Konziliarna amb", "RT ambulancie", "Chemo amb", "Disp. Ambulancia", "RTG Terapia"] # ZMENA: bez diakritiky
             is_motto = (row[1][0] == st.session_state.get('motto', 'Motto'))
             
             for c_idx, value in enumerate(row[1], 1):
@@ -796,14 +797,19 @@ def register_fonts():
                 pass
     return font_registered
 
+def remove_diacritics(text):
+    if text is None: return ""
+    return ''.join(c for c in unicodedata.normalize('NFD', str(text))
+                  if unicodedata.category(c) != 'Mn')
+
 def create_pdf_report(df, motto):
-    """Vytvorí PDF s podporou SK diakritiky a bez emoji."""
+    """Vytvorí PDF bez diakritiky a emoji."""
     buffer = io.BytesIO()
     
-    has_custom_font = register_fonts()
-    font_normal = 'DejaVuSans' if has_custom_font else 'Helvetica'
-    font_bold = 'DejaVuSans-Bold' if has_custom_font else 'Helvetica-Bold'
-    font_italic = 'DejaVuSans-Oblique' if has_custom_font else 'Helvetica-Oblique'
+    # Pouzijeme standardne fonty, kedze odstranujeme diakritiku
+    font_normal = 'Helvetica'
+    font_bold = 'Helvetica-Bold'
+    font_italic = 'Helvetica-Oblique'
 
     doc = SimpleDocTemplate(
         buffer,
@@ -816,16 +822,18 @@ def create_pdf_report(df, motto):
     elements = []
     styles = getSampleStyleSheet()
     
-    title = f"Rozpis prác Onkologická klinika {df.columns[1]} - {df.columns[-1]}"
+    title_text = f"Rozpis prac Onkologicka klinika {df.columns[1]} - {df.columns[-1]}" # ZMENA: bez diakritiky
     title_style = styles['Title']
     title_style.fontName = font_bold
     title_style.fontSize = 14
-    elements.append(Paragraph(title, title_style))
+    elements.append(Paragraph(title_text, title_style))
     elements.append(Spacer(1, 12))
     
     def clean_text(value):
         if value is None: return ""
-        s = str(value)
+        # 1. Odstranit diakritiku
+        s = remove_diacritics(str(value))
+        # 2. Odstranit emoji a ine znaky
         cleaned = []
         for ch in s:
             code = ord(ch)
@@ -858,8 +866,8 @@ def create_pdf_report(df, motto):
         ('FONTNAME', (0, 1), (-1, -1), font_normal),
     ])
     
-    section_rows = ["Oddelenie", "Konziliárna amb", "RT ambulancie", "Chemo amb", "Disp. Ambulancia", "RTG Terapia"]
-    motto_text = motto or "Motto"
+    section_rows = ["Oddelenie", "Konziliarna amb", "RT ambulancie", "Chemo amb", "Disp. Ambulancia", "RTG Terapia"] # ZMENA: bez diakritiky
+    motto_text = clean_text(motto or "Motto")
     
     for i, row in enumerate(data):
         cell0 = row[0]
@@ -989,7 +997,7 @@ def main():
                 dates, grid, docs, d_info = generate_data_structure(st.session_state.config, absences, start_d)
                 
                 df_display = create_display_df(dates, grid, docs, d_info, st.session_state.motto, st.session_state.config)
-                df_display.columns = ["Sekcia / Dátum"] + dates
+                df_display.columns = ["Sekcia / Datum"] + dates # ZMENA: Datum bez diakritiky
                 st.session_state.df_display = df_display
                 st.success("✅ Hotovo!")
                 
