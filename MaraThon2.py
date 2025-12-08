@@ -337,9 +337,9 @@ def migrate_homolova_to_vidulin(config):
 
 def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, manual_core=None):
     """
-    Vylepšená distribúcia izieb s "Robin Hood" mechanizmom:
-    Ak je niekto "hladný" (má 0 izieb z minula), bohatí (čo majú veľa izieb) musia
-    povinne odovzdať izby do spoločného banku, aby sa vyrovnali.
+    Vylepšená distribúcia izieb s "Hard Reset" mechanizmom:
+    Ak je nerovnováha, kontinuita je tvrdo potlačená na úroveň priemerného podielu,
+    aby sa uvoľnilo maximum izieb pre "hladných" lekárov.
     """
     if not doctors_list:
         return {}, {}
@@ -386,32 +386,32 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
         else:
             caps[d] = 100 
 
-    # --- ROBIN HOOD MECHANIZMUS ---
-    # Zistíme, či je tu niekto, kto by mal mať veľa izieb (limit > 12), ale má 0 (z minula).
+    # --- DETEKCIA NEROVNOVÁHY ---
     starving_doctors = False
-    for d in active_assignees:
-        if caps[d] > 12: # Je to plnohodnotný lekár (nie RT)
-            # Ak nemá žiadne izby v core a nemal ani v minulosti (alebo má 0)
-            if current_beds[d] == 0:
-                 starving_doctors = True
-                 break
+    full_time_docs = [d for d in active_assignees if caps[d] > 12]
+    
+    for d in full_time_docs:
+        # Ak nemá žiadne izby v core a nemal ani v minulosti (alebo má 0)
+        if current_beds[d] == 0:
+             starving_doctors = True
+             break
 
-    # Výpočet limitu pre kontinuitu
+    # Výpočet limitu pre kontinuitu (HARD RESET)
     total_beds_total = sum(r[1] for r in ROOMS_LIST)
-    active_full_time_count = len([d for d in active_assignees if caps[d] > 12])
+    active_full_time_count = len(full_time_docs)
     if active_full_time_count == 0: active_full_time_count = 1
     
+    # Ideálny podiel na hlavu (napr. 42 / 3 = 14)
     avg_load = total_beds_total / active_full_time_count
     
-    # Ak je niekto "hladný" (Vidulin), nastavíme tvrdý limit.
-    # Nikto si nesmie z minula nechať viac ako priemer - 2 lôžka (aby ostalo dosť v banku).
+    # Ak je niekto "hladný", kontinuita nesmie prekročiť priemer.
+    # Tým pádom, ak má Hunáková 20, zrazíme ju na 14.
     if starving_doctors:
-        soft_continuity_limit = max(avg_load - 2, 4) 
+        soft_continuity_limit = avg_load 
     else:
-        # Inak môžeme byť benevolentnejší
-        soft_continuity_limit = max(avg_load * 1.2, 8)
+        soft_continuity_limit = 100 # Bez limitu
 
-    # --- 2. Kontinuita (zachovanie izieb z minulosti) s OBMEDZENÍM ---
+    # --- 2. Kontinuita (zachovanie izieb z minulosti) s HARD RESETOM ---
     if previous_assignments:
         for doc in active_assignees:
             if doc in previous_assignments:
@@ -427,14 +427,15 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
                     # Prísna kontrola pre RT (12)
                     hard_limit = caps.get(doc, 100)
                     
-                    # Kontrola Robin Hood limitu
+                    # Kontrola Soft limitu (Hard Reset)
+                    # Ak by pridanie izby prekročilo priemer (pri nerovnováhe), izbu NEDÁME.
                     if (current_beds[doc] + r_obj[1] <= hard_limit) and \
                        (current_beds[doc] + r_obj[1] <= soft_continuity_limit):
                         assignment[doc].append(r_obj)
                         current_beds[doc] += r_obj[1]
                         available_rooms.remove(r_obj)
                     else:
-                        pass # Izba prepadá do spoločného banku
+                        pass # Izba prepadá do spoločného banku pre Vidulin
 
     # --- 3. Rozdelenie zvyšných izieb (Fair Share) ---
     while available_rooms:
