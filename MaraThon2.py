@@ -26,8 +26,8 @@ CONFIG_FILE = 'hospital_config.json'
 HISTORY_FILE = 'room_history.json'
 PRIVATE_CALENDAR_URL = "https://calendar.google.com/calendar/ical/fntnonk%40gmail.com/private-e8ce4e0639a626387fff827edd26b87f/basic.ics"
 
-GIST_FILENAME_CONFIG = "hospital_config_v9.json"
-GIST_FILENAME_HISTORY = "room_history_v9.json"
+GIST_FILENAME_CONFIG = "hospital_config_v10.json"
+GIST_FILENAME_HISTORY = "room_history_v10.json"
 
 ROOMS_LIST = [
     (1, 3), (2, 3), (3, 3), (4, 3), (5, 3),
@@ -466,29 +466,24 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
     
     dates, data_grid = [], {}
     
-    # NOVÁ LOGIKA PRE ZBER LEKÁROV
-    # Zbierame aktívnych + tých, čo majú extra dni v tomto týždni
+    # 1. Zber lekárov (Active + Extra Days)
     all_doctors = []
-    doctors_info = {} # Pre ukladanie poznámok (napr. "len 30.12.")
+    doctors_info = {} 
 
-    # Generovanie dátumov týždňa pre kontrolu extra dní
     week_dates_str = []
     for i in range(7):
         d = thursday + timedelta(days=i)
-        if d.weekday() < 5: # Len pracovne dni Po-Pi
+        if d.weekday() < 5: 
             week_dates_str.append(d.strftime('%Y-%m-%d'))
 
     for d_name, props in config['lekari'].items():
         is_active = props.get('active', True)
         extra_days = props.get('extra_dni', [])
-        
-        # Má v tomto týždni extra deň?
         has_extra_in_week = any(ed in week_dates_str for ed in extra_days)
         
         if is_active or has_extra_in_week:
             all_doctors.append(d_name)
             if not is_active and has_extra_in_week:
-                # Formátovanie dátumu pre zobrazenie (napr. 2025-12-30 -> 30.12.)
                 readable_days = []
                 for ed in extra_days:
                     if ed in week_dates_str:
@@ -517,92 +512,115 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
         closed_today = closures.get(date_key, [])
         data_grid[date_str] = {}
         
-        # Filtrovanie dostupných lekárov pre KONKRÉTNY DEŇ
-        # Musí byť aktívny ALEBO mať extra deň práve dnes
+        # 2. Určenie dostupných lekárov pre tento deň
         available = []
         for d in all_doctors:
             props = config['lekari'][d]
             is_normally_active = props.get('active', True)
             has_extra_today = date_key in props.get('extra_dni', [])
             
-            # Ak je neaktívny a nemá extra deň dnes -> preskočiť
-            if not is_normally_active and not has_extra_today:
-                continue
-                
-            # Ak je na dovolenke -> preskočiť (už riešené inde, ale pre istotu)
-            if d in day_absences:
-                continue
-                
-            # Ak má deň voľna (nepracuje) -> preskočiť
-            if day_name in props.get('nepracuje', []):
-                continue
+            if not is_normally_active and not has_extra_today: continue
+            if d in day_absences: continue
+            if day_name in props.get('nepracuje', []): continue
                 
             available.append(d)
 
         assigned_amb = {}
         
+        # 3. Pevné dni (Highest Priority)
         for doc in list(available):
             if fixed := config['lekari'][doc].get('pevne_dni', {}).get(day_name):
+                # Ošetriť viacnásobné pevné dni
                 for t in [t.strip() for t in fixed.split(',')]:
                     if t in closed_today:
                         assigned_amb[t] = "ZATVORENÉ"
                     else:
                         assigned_amb[t] = doc
+                # Ak má pevný deň, už nie je dostupný pre iné
                 available.remove(doc)
-                
-        processing_order = ["Radio 2A", "Radio 2B", "Chemo 8B", "Chemo 8A", "Chemo 8C", "Wolf", "Prijmova", "Velka dispenzarna", "Mala dispenzarna"]
         
-        for amb_name in processing_order:
-            if amb_name == "Wolf":
-                if "Spanik" in all_doctors and "Spanik" not in day_absences:
-                    if assigned_amb.get("Mala dispenzarna") == "Spanik":
-                        assigned_amb["Wolf"] = "Spanik"
-                        continue
-                        
-            if amb_name in assigned_amb:
-                continue
-                
+        # 4. Smart Assignment (Scarcity-based)
+        # Namiesto fixného poradia zistíme, kde je "úzke hrdlo" (najmenej kandidátov)
+        
+        ambs_to_process = ["Radio 2A", "Radio 2B", "Chemo 8B", "Chemo 8A", "Chemo 8C", "Wolf", "Prijmova", "Velka dispenzarna", "Mala dispenzarna"]
+        amb_scarcity = []
+
+        for amb_name in ambs_to_process:
+            if amb_name in assigned_amb: continue # Už obsadené pevným dňom
             if amb_name in closed_today:
                 assigned_amb[amb_name] = "ZATVORENÉ"
                 continue
-                
+            
             amb_info = config['ambulancie'][amb_name]
             if day_name not in amb_info['dni']:
                 assigned_amb[amb_name] = "---"
                 continue
-                
+
+            # Špeciálna podmienka pre Radio 2B (Martinka)
             if amb_name == "Radio 2B" and "Martinka" not in available:
                 assigned_amb[amb_name] = "ZATVORENÉ"
                 continue
-                
+
+            # Zistenie kandidátov
             prio_list = amb_info['priority']
             if isinstance(prio_list, dict):
                 prio_list = prio_list.get(str(curr_date.weekday()), prio_list.get('default', []))
-                
-            for doc in prio_list:
-                if doc in available and amb_name in config['lekari'][doc].get('moze', []):
-                    assigned_amb[amb_name] = doc
-                    available.remove(doc)
-                    break
-            if amb_name not in assigned_amb:
+            
+            candidates = [doc for doc in prio_list if doc in available and amb_name in config['lekari'][doc].get('moze', [])]
+            
+            # Wolf check: Ak je Spanik v Malej Dispenzarni, Wolf je 'vyriešený' ním.
+            # Ale to vieme až po priradení. Takže Wolf berieme ako bežnú ambulanciu, 
+            # ale s nižšou prioritou ak má veľa kandidátov.
+            
+            amb_scarcity.append({
+                "name": amb_name,
+                "candidates": candidates,
+                "count": len(candidates),
+                "original_index": ambs_to_process.index(amb_name) # Tie-breaker
+            })
+        
+        # Zoradenie podľa počtu kandidátov (vzostupne) -> Najkritickejšie prvé
+        amb_scarcity.sort(key=lambda x: (x['count'], x['original_index']))
+        
+        for item in amb_scarcity:
+            amb_name = item['name']
+            
+            # Double check (ak by sa niekto minul v predchádzajúcom kroku cyklu)
+            current_candidates = [c for c in item['candidates'] if c in available]
+            
+            # Špeciálny Wolf logic (Spanik) - aplikujeme dynamicky
+            if amb_name == "Wolf":
+                if "Spanik" in all_doctors and "Spanik" not in day_absences:
+                     if assigned_amb.get("Mala dispenzarna") == "Spanik":
+                        assigned_amb["Wolf"] = "Spanik"
+                        continue
+
+            if not current_candidates:
                 assigned_amb[amb_name] = "NEOBSADENÉ"
+                continue
                 
+            # Assign first available candidate
+            chosen_doc = current_candidates[0]
+            assigned_amb[amb_name] = chosen_doc
+            available.remove(chosen_doc)
+
+        # 5. Vyplnenie gridu
         for amb, val in assigned_amb.items():
             data_grid[date_str][amb] = val
             
         wolf_doc = assigned_amb.get("Wolf")
         
+        # 6. Rozdelenie izieb (zvyšok lekárov)
         if "ODDELENIE (Celé)" in closed_today:
             room_text_map, room_raw_map = {}, {}
             for doc in all_doctors:
-                if doc in day_absences:
-                    continue
-                if doc in assigned_amb.values():
-                    continue
+                if doc in day_absences: continue
+                if doc in assigned_amb.values(): continue
                 if "Oddelenie" in config['lekari'][doc].get('moze', []):
                     room_text_map[doc] = "ZATVORENÉ"
         else:
             ward_candidates = [d for d in available if "Oddelenie" in config['lekari'][d].get('moze', [])]
+            # Wolf doctor also helps on ward if explicitly allowed (usually logic handles cap)
             if wolf_doc and wolf_doc not in ward_candidates and "Oddelenie" in config['lekari'].get(wolf_doc, {}).get('moze', []):
                 ward_candidates.append(wolf_doc)
                 
@@ -612,15 +630,14 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
             if save_hist:
                 history[date_key] = room_raw_map
                 
+        # 7. Finalizácia stringov pre Excel/PDF
         for doc in all_doctors:
-            # Ak lekár v tento deň vôbec nie je "available" (ani aktívny, ani extra deň),
-            # mal by mať prázdne políčko alebo poznámku
             props = config['lekari'][doc]
             is_active = props.get('active', True)
             has_extra = date_key in props.get('extra_dni', [])
             
             if not is_active and not has_extra:
-                data_grid[date_str][doc] = "" # Neaktívny v tento deň
+                data_grid[date_str][doc] = "" 
                 continue
 
             if doc in day_absences:
@@ -684,7 +701,6 @@ def create_display_df(dates, data_grid, all_doctors, doctors_info, motto, config
                 val = val.replace(old, new)
             vals.append(val)
         
-        # Pridanie info k menu lekára
         doc_label = f"Dr {doc}"
         if doc in doctors_info:
             doc_label += f" {doctors_info[doc]}"
@@ -973,7 +989,6 @@ elif mode == "⚙️ Nastavenia lekárov":
                 st.markdown("##### 📅 Extra dni (pre neaktívnych)")
                 current_extras = data.get('extra_dni', [])
                 
-                # Interface na pridanie dátumu
                 c_date1, c_date2 = st.columns([2, 1])
                 new_extra = c_date1.date_input(f"Pridať deň pre {doc}", key=f"date_{doc}")
                 
