@@ -896,6 +896,41 @@ def send_email_with_pdf(pdf_bytes, filename, to_email, subject, body):
         st.error(f"Chyba: {e}")
         return False
 
+# Pomocná funkcia na zoskupenie dátumov do intervalov
+def group_closures_to_intervals(closures_dict):
+    """
+    Vstup: {'2025-12-24': ['A', 'B'], '2025-12-25': ['A', 'B'], '2025-12-26': ['A', 'C']}
+    Výstup: [
+       (start, end, ['A', 'B']),
+       (start, end, ['A', 'C'])
+    ]
+    """
+    sorted_dates = sorted(closures_dict.keys())
+    if not sorted_dates:
+        return []
+        
+    intervals = []
+    current_start = sorted_dates[0]
+    current_end = sorted_dates[0]
+    current_val = sorted(closures_dict[sorted_dates[0]])
+    
+    for date_str in sorted_dates[1:]:
+        d = datetime.strptime(date_str, '%Y-%m-%d').date()
+        prev_d = datetime.strptime(current_end, '%Y-%m-%d').date()
+        val = sorted(closures_dict[date_str])
+        
+        # Ak je deň nasledujúci a hodnota je rovnaká -> predĺž interval
+        if (d - prev_d).days == 1 and val == current_val:
+            current_end = date_str
+        else:
+            intervals.append((current_start, current_end, current_val))
+            current_start = date_str
+            current_end = date_str
+            current_val = val
+            
+    intervals.append((current_start, current_end, current_val))
+    return intervals
+
 st.set_page_config(page_title="Rozpis FN Trenčín", layout="wide")
 st.title("🏥 Rozpis prác - Onkologická klinika FN Trenčín")
 
@@ -919,33 +954,71 @@ if mode == "🚀 Generovať rozpis":
     with st.expander("📅 Výnimky a zatváranie", expanded=True):
         st.info("Tu môžete nastaviť dni, kedy sú ambulancie alebo celé oddelenie zatvorené.")
         
-        # 1. Zobrazenie existujúcich "temp" výnimiek pre tento session
+        # --- ZOBRAZENIE ULOŽENÝCH VÝNIMIEK Z CONFIGU ---
+        if 'closures' in st.session_state.config and st.session_state.config['closures']:
+            st.markdown("##### 💾 Aktívne výnimky v databáze:")
+            stored_intervals = group_closures_to_intervals(st.session_state.config['closures'])
+            
+            for start_s, end_s, closed_list in stored_intervals:
+                c_s1, c_s2, c_s3 = st.columns([2, 4, 1])
+                
+                # Formátovanie dátumu
+                d1 = datetime.strptime(start_s, '%Y-%m-%d')
+                d2 = datetime.strptime(end_s, '%Y-%m-%d')
+                date_label = f"{d1.strftime('%d.%m.%Y')} - {d2.strftime('%d.%m.%Y')}" if start_s != end_s else d1.strftime('%d.%m.%Y')
+                
+                # Formátovanie zoznamu
+                all_ambs = list(st.session_state.config['ambulancie'].keys())
+                all_ambs.append("ODDELENIE (Celé)")
+                if len(closed_list) >= len(all_ambs):
+                    closed_label = "🔴 VŠETKO ZATVORENÉ"
+                elif "ODDELENIE (Celé)" in closed_list and len(closed_list) >= len(all_ambs) - 1:
+                    closed_label = "🔴 ODDELENIE + VŠETKY AMB"
+                else:
+                    closed_label = ", ".join(closed_list)
+                
+                c_s1.text(f"🗓️ {date_label}")
+                c_s2.markdown(f"**{closed_label}**")
+                
+                if c_s3.button("🗑️ Zmazať", key=f"del_stored_{start_s}_{end_s}"):
+                    # Vymazať dni z configu
+                    curr = d1
+                    while curr <= d2:
+                        k = curr.strftime('%Y-%m-%d')
+                        if k in st.session_state.config['closures']:
+                            del st.session_state.config['closures'][k]
+                        curr += timedelta(days=1)
+                    save_config(st.session_state.config)
+                    st.rerun()
+
+        # --- SEKICIA PRE NOVÉ VÝNIMKY (TEMP) ---
+        st.markdown("---")
+        st.markdown("##### Pridať nové výnimky:")
+        
+        # Zobrazenie temp výnimiek
         indices_to_remove = []
         for i, (d_range, closed_items) in enumerate(st.session_state.temp_exceptions):
             c_show1, c_show2, c_show3 = st.columns([2, 3, 1])
-            
             d_start_s = d_range[0].strftime('%d.%m.')
             d_end_s = d_range[1].strftime('%d.%m.%Y') if len(d_range) > 1 else ""
             label_date = f"{d_start_s} - {d_end_s}" if d_end_s else d_start_s
             
-            c_show1.text(f"🗓️ {label_date}")
+            c_show1.text(f"🆕 {label_date}")
             c_show2.text(f"🔒 {', '.join(closed_items)}")
-            if c_show3.button("🗑️", key=f"del_exc_{i}"):
+            if c_show3.button("❌", key=f"del_temp_{i}"):
                 indices_to_remove.append(i)
         
         for idx in sorted(indices_to_remove, reverse=True):
             st.session_state.temp_exceptions.pop(idx)
         
-        # 2. Formulár na pridanie novej výnimky
-        st.markdown("---")
+        # Formulár
         c_ex1, c_ex2 = st.columns([1, 2])
         new_range = c_ex1.date_input("Nový rozsah dátumov:", value=[], key="new_ex_range")
         amb_options = ["ODDELENIE (Celé)"] + list(st.session_state.config['ambulancie'].keys())
         new_closed = c_ex2.multiselect("Čo zatvoriť v tomto termíne?", options=amb_options, key="new_ex_closed")
         
-        if st.button("➕ Pridať ďalšiu výnimku"):
+        if st.button("➕ Pridať do zoznamu"):
             if new_range and new_closed:
-                # Ak je vybraný len jeden deň, spravíme z neho list [d, d] pre konzistenciu
                 r = (new_range[0], new_range[1]) if len(new_range) > 1 else (new_range[0], new_range[0])
                 st.session_state.temp_exceptions.append((r, new_closed))
                 st.rerun() 
@@ -954,35 +1027,33 @@ if mode == "🚀 Generovať rozpis":
             elif not new_closed:
                 st.warning("Vyberte čo má byť zatvorené.")
 
-        # 3. Tlačidlo na trvalé uloženie do configu
-        st.markdown("---")
-        if st.button("💾 Uložiť všetky výnimky do konfigurácie", type="primary"):
-            if 'closures' not in st.session_state.config:
-                st.session_state.config['closures'] = {}
-            
-            count = 0
-            for d_range, closed_items in st.session_state.temp_exceptions:
-                curr = d_range[0]
-                end = d_range[1]
-                while curr <= end:
-                    d_key = curr.strftime('%Y-%m-%d')
-                    
-                    # LOGIKA ZLUČOVANIA VÝNIMIEK
-                    # Ak už pre tento deň existujú zatvorené veci, pridáme k nim nové (unikátne)
-                    if d_key in st.session_state.config['closures']:
-                        existing = set(st.session_state.config['closures'][d_key])
-                        new_ones = set(closed_items)
-                        merged = list(existing.union(new_ones))
-                        st.session_state.config['closures'][d_key] = merged
-                    else:
-                        st.session_state.config['closures'][d_key] = closed_items
-                    
-                    curr += timedelta(days=1)
-                    count += 1
-            
-            save_config(st.session_state.config)
-            st.success(f"✅ Uložené! Výnimky boli aktualizované pre {count} dní.")
-            st.session_state.temp_exceptions = [] 
+        # Uloženie
+        if st.session_state.temp_exceptions:
+            st.markdown("---")
+            if st.button("💾 Uložiť nové výnimky do databázy", type="primary"):
+                if 'closures' not in st.session_state.config:
+                    st.session_state.config['closures'] = {}
+                
+                count = 0
+                for d_range, closed_items in st.session_state.temp_exceptions:
+                    curr = d_range[0]
+                    end = d_range[1]
+                    while curr <= end:
+                        d_key = curr.strftime('%Y-%m-%d')
+                        if d_key in st.session_state.config['closures']:
+                            existing = set(st.session_state.config['closures'][d_key])
+                            new_ones = set(closed_items)
+                            merged = list(existing.union(new_ones))
+                            st.session_state.config['closures'][d_key] = merged
+                        else:
+                            st.session_state.config['closures'][d_key] = closed_items
+                        curr += timedelta(days=1)
+                        count += 1
+                
+                save_config(st.session_state.config)
+                st.session_state.temp_exceptions = [] 
+                st.success(f"✅ Uložené! Výnimky boli aktualizované.")
+                st.rerun()
 
     st.markdown("### Manuálne pridelenie izieb")
     manual_core_input = {}
