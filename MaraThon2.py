@@ -337,8 +337,9 @@ def migrate_homolova_to_vidulin(config):
 
 def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, manual_core=None):
     """
-    PRÍSNY REŽIM: Kontinuita je povolená LEN do výšky priemeru.
-    Žiadna tolerancia navyše.
+    ULTIMATE FAIRNESS: 
+    Kontinuita je striktne ohraničená priemerom. Žiadna tolerancia.
+    Ak máš viac ako priemer, izby ti berieme a dávame tomu, kto má najmenej.
     """
     if not doctors_list:
         return {}, {}
@@ -394,8 +395,8 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
     # Priemerný počet lôžok na jedného "plného" lekára
     average_load = total_beds_total / active_full_time_count
     
-    # KĽÚČOVÁ OPRAVA: Limit je presne priemer. Žiadna tolerancia +2.0.
-    # Týmto sa vynúti uvoľnenie izieb, ak má niekto 15 a priemer je 14.
+    # KĽÚČOVÁ VEC: ŽIADNA TOLERANCIA. Limit = Priemer.
+    # Ak je priemer 14.0 a lekár má 15, izbu nedostane/neudrží si ju.
     soft_continuity_limit = average_load 
 
     # --- 2. Kontinuita (zachovanie izieb z minulosti) s OBMEDZENÍM ---
@@ -413,14 +414,14 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
                 for r_obj in my_prev_rooms:
                     hard_limit = caps.get(doc, 100)
                     
-                    # Ak pridanie izby neprekročí tvrdý limit ANI priemer, ok.
+                    # Tu sa deje mágia spravodlivosti:
                     if (current_beds[doc] + r_obj[1] <= hard_limit) and \
                        (current_beds[doc] + r_obj[1] <= soft_continuity_limit):
                         assignment[doc].append(r_obj)
                         current_beds[doc] += r_obj[1]
                         available_rooms.remove(r_obj)
                     else:
-                        # Izba sa uvoľní pre chudobných (Vidulin)
+                        # Príliš veľa izieb? Do widzenia, izba ide do spoločného banku.
                         pass 
 
     # --- 3. Rozdelenie zvyšných izieb (Dorovnávanie) ---
@@ -430,7 +431,7 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
         if not candidates:
              candidates = active_assignees
 
-        # VYLEPŠENÝ SORT: Kto má najmenej, berie prvé.
+        # Zoradenie: Najprv tí, čo majú najmenej.
         candidates.sort(key=lambda d: (current_beds[d], d))
         
         target_doc = candidates[0]
