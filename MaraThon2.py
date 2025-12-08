@@ -26,8 +26,8 @@ CONFIG_FILE = 'hospital_config.json'
 HISTORY_FILE = 'room_history.json'
 PRIVATE_CALENDAR_URL = "https://calendar.google.com/calendar/ical/fntnonk%40gmail.com/private-e8ce4e0639a626387fff827edd26b87f/basic.ics"
 
-GIST_FILENAME_CONFIG = "hospital_config_v8.json"
-GIST_FILENAME_HISTORY = "room_history_v8.json"
+GIST_FILENAME_CONFIG = "hospital_config_v9.json"
+GIST_FILENAME_HISTORY = "room_history_v9.json"
 
 ROOMS_LIST = [
     (1, 3), (2, 3), (3, 3), (4, 3), (5, 3),
@@ -258,7 +258,8 @@ def get_default_config():
             },
             "Hrabosova": {
                 "moze": ["Oddelenie", "Velka dispenzarna", "Mala dispenzarna"],
-                "active": False
+                "active": False,
+                "extra_dni": []
             },
             "Bocak": {
                 "moze": ["Velka dispenzarna"],
@@ -462,8 +463,41 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
     days_map = {0: "Pondelok", 1: "Utorok", 2: "Streda", 3: "Stvrtok", 4: "Piatok"}
     weekday = start_date.weekday()
     thursday = start_date + timedelta(days=(3 - weekday) % 7)
+    
     dates, data_grid = [], {}
-    all_doctors = sorted([d for d, props in config['lekari'].items() if props.get('active')])
+    
+    # NOVÁ LOGIKA PRE ZBER LEKÁROV
+    # Zbierame aktívnych + tých, čo majú extra dni v tomto týždni
+    all_doctors = []
+    doctors_info = {} # Pre ukladanie poznámok (napr. "len 30.12.")
+
+    # Generovanie dátumov týždňa pre kontrolu extra dní
+    week_dates_str = []
+    for i in range(7):
+        d = thursday + timedelta(days=i)
+        if d.weekday() < 5: # Len pracovne dni Po-Pi
+            week_dates_str.append(d.strftime('%Y-%m-%d'))
+
+    for d_name, props in config['lekari'].items():
+        is_active = props.get('active', True)
+        extra_days = props.get('extra_dni', [])
+        
+        # Má v tomto týždni extra deň?
+        has_extra_in_week = any(ed in week_dates_str for ed in extra_days)
+        
+        if is_active or has_extra_in_week:
+            all_doctors.append(d_name)
+            if not is_active and has_extra_in_week:
+                # Formátovanie dátumu pre zobrazenie (napr. 2025-12-30 -> 30.12.)
+                readable_days = []
+                for ed in extra_days:
+                    if ed in week_dates_str:
+                        dt = datetime.strptime(ed, '%Y-%m-%d')
+                        readable_days.append(dt.strftime('%d.%m.'))
+                doctors_info[d_name] = f"⚠️ len {', '.join(readable_days)}"
+
+    all_doctors = sorted(all_doctors)
+    
     history = load_history()
     day_before_str = (thursday - timedelta(days=1)).strftime('%Y-%m-%d')
     last_day_assignments = history.get(day_before_str, {})
@@ -482,7 +516,29 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
         day_absences = absences.get(date_key, {})
         closed_today = closures.get(date_key, [])
         data_grid[date_str] = {}
-        available = [d for d in all_doctors if d not in day_absences and day_name not in config['lekari'][d].get('nepracuje', [])]
+        
+        # Filtrovanie dostupných lekárov pre KONKRÉTNY DEŇ
+        # Musí byť aktívny ALEBO mať extra deň práve dnes
+        available = []
+        for d in all_doctors:
+            props = config['lekari'][d]
+            is_normally_active = props.get('active', True)
+            has_extra_today = date_key in props.get('extra_dni', [])
+            
+            # Ak je neaktívny a nemá extra deň dnes -> preskočiť
+            if not is_normally_active and not has_extra_today:
+                continue
+                
+            # Ak je na dovolenke -> preskočiť (už riešené inde, ale pre istotu)
+            if d in day_absences:
+                continue
+                
+            # Ak má deň voľna (nepracuje) -> preskočiť
+            if day_name in props.get('nepracuje', []):
+                continue
+                
+            available.append(d)
+
         assigned_amb = {}
         
         for doc in list(available):
@@ -557,6 +613,16 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
                 history[date_key] = room_raw_map
                 
         for doc in all_doctors:
+            # Ak lekár v tento deň vôbec nie je "available" (ani aktívny, ani extra deň),
+            # mal by mať prázdne políčko alebo poznámku
+            props = config['lekari'][doc]
+            is_active = props.get('active', True)
+            has_extra = date_key in props.get('extra_dni', [])
+            
+            if not is_active and not has_extra:
+                data_grid[date_str][doc] = "" # Neaktívny v tento deň
+                continue
+
             if doc in day_absences:
                 data_grid[date_str][doc] = day_absences[doc]
             elif doc in room_text_map:
@@ -568,7 +634,7 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
     if save_hist:
         save_history(history)
         
-    return dates, data_grid, all_doctors
+    return dates, data_grid, all_doctors, doctors_info
 
 def scan_future_problems(config, weeks_ahead=12):
     problems = []
@@ -579,7 +645,7 @@ def scan_future_problems(config, weeks_ahead=12):
     current = start
     
     while current <= end:
-        dates, grid, docs = generate_data_structure(config, absences, current, save_hist=False)
+        dates, grid, docs, info = generate_data_structure(config, absences, current, save_hist=False)
         for date_str in dates:
             date_obj = datetime.strptime(date_str, '%d.%m.%Y')
             date_key = date_obj.strftime('%Y-%m-%d')
@@ -600,7 +666,7 @@ def scan_future_problems(config, weeks_ahead=12):
         
     return pd.DataFrame(problems) if problems else None
 
-def create_display_df(dates, data_grid, all_doctors, motto, config):
+def create_display_df(dates, data_grid, all_doctors, doctors_info, motto, config):
     rows = []
     ward_doctors = [d for d in all_doctors if "Oddelenie" in config['lekari'][d].get('moze', [])]
     display_map = {
@@ -617,7 +683,13 @@ def create_display_df(dates, data_grid, all_doctors, motto, config):
             for old, new in display_map.items():
                 val = val.replace(old, new)
             vals.append(val)
-        rows.append([f"Dr {doc}"] + vals)
+        
+        # Pridanie info k menu lekára
+        doc_label = f"Dr {doc}"
+        if doc in doctors_info:
+            doc_label += f" {doctors_info[doc]}"
+            
+        rows.append([doc_label] + vals)
         
     rows.append([motto or "Motto"] + [""] * len(dates))
     
@@ -817,8 +889,8 @@ if mode == "🚀 Generovať rozpis":
         with st.spinner("Počítam..."):
             end_d = start_d + timedelta(days=14)
             absences = get_ical_events(datetime.combine(start_d, datetime.min.time()), datetime.combine(end_d, datetime.min.time()))
-            dates, grid, docs = generate_data_structure(st.session_state.config, absences, start_d)
-            df_display = create_display_df(dates, grid, docs, st.session_state.motto, st.session_state.config)
+            dates, grid, docs, d_info = generate_data_structure(st.session_state.config, absences, start_d)
+            df_display = create_display_df(dates, grid, docs, d_info, st.session_state.motto, st.session_state.config)
             df_display.columns = ["Sekcia / Dátum"] + dates
             st.session_state.df_display = df_display
             st.success("✅ Hotovo!")
@@ -894,7 +966,37 @@ elif mode == "⚙️ Nastavenia lekárov":
             
     for doc, data in st.session_state.config['lekari'].items():
         with st.expander(f"{doc} {'(Neaktívny)' if not data.get('active', True) else ''}"):
-            act = st.checkbox("Aktívny", value=data.get('active', True), key=f"act_{doc}")
+            c_main1, c_main2 = st.columns(2)
+            act = c_main1.checkbox("Aktívny", value=data.get('active', True), key=f"act_{doc}")
+            
+            if not act:
+                st.markdown("##### 📅 Extra dni (pre neaktívnych)")
+                current_extras = data.get('extra_dni', [])
+                
+                # Interface na pridanie dátumu
+                c_date1, c_date2 = st.columns([2, 1])
+                new_extra = c_date1.date_input(f"Pridať deň pre {doc}", key=f"date_{doc}")
+                
+                if c_date2.button("➕ Pridať deň", key=f"add_date_{doc}"):
+                    d_str = new_extra.strftime('%Y-%m-%d')
+                    if d_str not in current_extras:
+                        current_extras.append(d_str)
+                        current_extras.sort()
+                        data['extra_dni'] = current_extras
+                        save_config(st.session_state.config)
+                        st.rerun()
+                
+                if current_extras:
+                    st.write("Naplánované dni:")
+                    for ed in current_extras:
+                        c_ex1, c_ex2 = st.columns([3, 1])
+                        c_ex1.text(ed)
+                        if c_ex2.button("❌", key=f"del_{doc}_{ed}"):
+                            current_extras.remove(ed)
+                            data['extra_dni'] = current_extras
+                            save_config(st.session_state.config)
+                            st.rerun()
+            
             all_places = list(st.session_state.config['ambulancie'].keys()) + ["Oddelenie"]
             can_do = st.multiselect("Môže pracovať:", all_places, default=[p for p in data.get('moze', []) if p in all_places], key=f"can_{doc}")
             
