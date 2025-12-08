@@ -945,10 +945,10 @@ if mode == "🚀 Generovať rozpis":
         
         if st.button("➕ Pridať ďalšiu výnimku"):
             if new_range and new_closed:
-                # Ak je vybraný len jeden deň, spravíme z neho list [d, d] pre konzistenciu alebo len tuple
+                # Ak je vybraný len jeden deň, spravíme z neho list [d, d] pre konzistenciu
                 r = (new_range[0], new_range[1]) if len(new_range) > 1 else (new_range[0], new_range[0])
                 st.session_state.temp_exceptions.append((r, new_closed))
-                st.rerun() # Refresh aby sa zobrazila v zozname hore
+                st.rerun() 
             elif not new_range:
                 st.warning("Vyberte dátum.")
             elif not new_closed:
@@ -960,25 +960,29 @@ if mode == "🚀 Generovať rozpis":
             if 'closures' not in st.session_state.config:
                 st.session_state.config['closures'] = {}
             
-            # Najprv vyčistíme staré closures ak treba, alebo len pridáme? 
-            # Tu záleží na logike. Pre bezpečnosť môžeme iba pridávať/prepísať dotknuté dni.
-            
             count = 0
             for d_range, closed_items in st.session_state.temp_exceptions:
                 curr = d_range[0]
                 end = d_range[1]
                 while curr <= end:
                     d_key = curr.strftime('%Y-%m-%d')
-                    # Ak už existuje záznam pre tento deň, zlúčime ho alebo prepíšeme?
-                    # Prepíšeme pre jednoduchosť, alebo spravíme union.
-                    # Tu prepíšeme podľa požiadavky "nastaviť výnimky".
-                    st.session_state.config['closures'][d_key] = closed_items
+                    
+                    # LOGIKA ZLUČOVANIA VÝNIMIEK
+                    # Ak už pre tento deň existujú zatvorené veci, pridáme k nim nové (unikátne)
+                    if d_key in st.session_state.config['closures']:
+                        existing = set(st.session_state.config['closures'][d_key])
+                        new_ones = set(closed_items)
+                        merged = list(existing.union(new_ones))
+                        st.session_state.config['closures'][d_key] = merged
+                    else:
+                        st.session_state.config['closures'][d_key] = closed_items
+                    
                     curr += timedelta(days=1)
                     count += 1
             
             save_config(st.session_state.config)
-            st.success(f"✅ Uložené! Nastavené výnimky pre {count} dní.")
-            st.session_state.temp_exceptions = [] # Vyčistiť temp po uložení
+            st.success(f"✅ Uložené! Výnimky boli aktualizované pre {count} dní.")
+            st.session_state.temp_exceptions = [] 
 
     st.markdown("### Manuálne pridelenie izieb")
     manual_core_input = {}
