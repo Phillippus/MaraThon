@@ -343,119 +343,120 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
     if previous_assignments is None:
         previous_assignments = {}
     
+    # Identifikácia rolí
     head_doc = "Kurisova" if "Kurisova" in doctors_list else ("Miklatkova" if "Miklatkova" in doctors_list else None)
     deputy_doc = "Kohutek" if "Kohutek" in doctors_list else None
     rt_help_doc = "Miklatkova" if "Miklatkova" in doctors_list else None
     
+    # Vytvorenie zoznamu "bežných" pracovníkov (bez primára a zástupcu)
     pure_workers = [d for d in doctors_list if d not in ["Kurisova", "Kohutek"]]
+    # Ak je Miklátková RT pomoc, ale nie je primárka, pridáme ju k pracovníkom (má svoju kapacitu)
     if rt_help_doc and head_doc != rt_help_doc and rt_help_doc not in pure_workers:
         pure_workers.append(rt_help_doc)
     
     num_workers = len(pure_workers)
     
-    caps = {d: 12 if d == wolf_doc_name else 15 for d in doctors_list}
-    if deputy_doc:
-        caps[deputy_doc] = 6
-    if rt_help_doc:
-        if num_workers >= 4:
-            caps[rt_help_doc] = 9
-        elif num_workers == 3:
-            caps[rt_help_doc] = 12
-        else:
-            caps[rt_help_doc] = 15
-    
-    if num_workers < 2:
-        for d in doctors_list:
-            caps[d] = 15
+    # Definícia kapacít (lôžok)
+    # Zvýšime základné limity, aby sa nestalo, že niekto ostane "zaseknutý" na 15 lôžkach, keď je veľa pacientov
+    # Namiesto tvrdých limitov použijeme dynamické vyvažovanie
     
     assignment = {d: [] for d in doctors_list}
     current_beds = {d: 0 for d in doctors_list}
-    available_rooms = sorted(ROOMS_LIST, key=lambda x: x[0])
+    available_rooms = sorted(ROOMS_LIST, key=lambda x: x[0]) # Zoradené podľa čísla izby
     
+    # 1. Manuálne pridelenie (Core)
     for doc, nums in manual_core.items():
-        if doc not in doctors_list:
-            continue
+        if doc not in doctors_list: continue
         for num in nums:
             r_obj = next((r for r in available_rooms if r[0] == num), None)
-            if not r_obj:
-                continue
+            if not r_obj: continue
             assignment[doc].append(r_obj)
             current_beds[doc] += r_obj[1]
             available_rooms.remove(r_obj)
     
+    # Zoznam lekárov, ktorí reálne berú izby (primár zvyčajne nie, ak je dosť ľudí)
     active_assignees = [d for d in doctors_list]
     if num_workers >= 2 and head_doc in active_assignees and head_doc != rt_help_doc:
         active_assignees.remove(head_doc)
     
+    if not active_assignees: # Fallback ak nikto nezostal
+        active_assignees = doctors_list
+
+    # 2. Kontinuita (zachovanie izieb z minulosti)
+    # Tu ale musíme dať pozor, aby sme nepridelili príliš veľa jednému človeku
     if previous_assignments:
-        divisors = len(active_assignees) if active_assignees else 1
-        total_system_beds = sum(r[1] for r in ROOMS_LIST)
-        ideal_load = total_system_beds / divisors
-        threshold_base = ideal_load * 1.1
-        
+        # Prejdeme lekárov v poradí podľa ich aktuálneho zaťaženia (zatiaľ 0 alebo manuálne)
+        # Ale kontinuita je dôležitá, tak im skúsime dať ich staré izby
         for doc in active_assignees:
-            if doc in previous_assignments and doc not in manual_core:
-                my_hist_rooms = [r for r_num in previous_assignments[doc] if (r := next((room for room in ROOMS_LIST if room[0] == r_num), None)) and r in available_rooms]
-                my_hist_rooms.sort(key=lambda x: x[0])
-                is_senior = (doc in SENIOR_DOCTORS) or (doc == deputy_doc)
-                temp_beds = sum(r[1] for r in my_hist_rooms)
-                my_limit = caps.get(doc, 15)
-                eff_limit = min(threshold_base, my_limit)
+            if doc in previous_assignments:
+                # Získame objekty izieb, ktoré mal predtým a sú stále voľné
+                my_prev_rooms = []
+                for r_num in previous_assignments[doc]:
+                    r_obj = next((r for r in available_rooms if r[0] == r_num), None)
+                    if r_obj:
+                        my_prev_rooms.append(r_obj)
                 
-                while temp_beds > eff_limit and my_hist_rooms:
-                    if is_senior:
-                        my_hist_rooms.pop()
-                    else:
-                        my_hist_rooms.pop(0)
-                    temp_beds = sum(r[1] for r in my_hist_rooms)
-                
-                for r_obj in my_hist_rooms:
-                    if current_beds[doc] + r_obj[1] <= caps.get(doc, 15):
-                        assignment[doc].append(r_obj)
-                        current_beds[doc] += r_obj[1]
-                        available_rooms.remove(r_obj)
+                # Pridelíme ich, pokiaľ to nie je extrémne veľa (napr. > 20 lôžok naraz)
+                # Alebo jednoducho pridelíme všetky "jeho" voľné a vyvažovanie spravíme neskôr pri nových
+                for r_obj in my_prev_rooms:
+                     assignment[doc].append(r_obj)
+                     current_beds[doc] += r_obj[1]
+                     available_rooms.remove(r_obj)
+
+    # 3. Rozdelenie zvyšných izieb (Fair Distribution)
+    # Cyklicky prideľujeme izbu tomu, kto má momentálne NAJMENEJ lôžok
     
     while available_rooms:
-        candidates = [d for d in active_assignees if current_beds[d] < caps.get(d, 15)]
-        if not candidates:
-            target_doc = head_doc if (head_doc and head_doc not in active_assignees) else (active_assignees[0] if active_assignees else None)
-            if not target_doc:
-                break
-            candidates = [target_doc]
+        # Vyberieme kandidátov (tí čo sú aktívni)
+        # Zoradíme ich podľa aktuálneho počtu lôžok (vzostupne)
+        # Ak majú rovnako, rozhoduje náhodne alebo abecedne (tu stabilne podľa poradia v liste)
         
-        candidates.sort(key=lambda w: current_beds[w])
-        target_doc = candidates[0]
+        # Špeciálna podmienka pre primára/zástupcu - majú mať menej ak je to možné?
+        # Zatiaľ ich berieme rovnocenne v rámci active_assignees, ale môžeme im dať penalizáciu k current_beds
         
-        doc_cap = caps.get(target_doc, 15)
-        is_senior = (target_doc in SENIOR_DOCTORS)
+        candidates = sorted(active_assignees, key=lambda d: current_beds[d])
+        target_doc = candidates[0] # Ten s najmenším počtom lôžok
         
-        def room_score(r):
-            deficit = doc_cap - current_beds[target_doc]
-            fits = 1 if r[1] <= deficit else 0
-            size_diff = abs(deficit - r[1])
-            my_rooms = [x[0] for x in assignment[target_doc]]
-            avg_pos = sum(my_rooms) / len(my_rooms) if my_rooms else 0
-            dist = abs(r[0] - avg_pos) if my_rooms else (r[0] if is_senior else 20 - r[0])
-            return (fits, -size_diff, -dist)
+        # Vyberieme pre neho najvhodnejšiu izbu
+        # Kritérium: blízko k jeho existujúcim izbám (priemer) alebo proste prvú voľnú
         
-        available_rooms.sort(key=room_score, reverse=True)
-        best_room = available_rooms.pop(0)
+        best_room = None
+        if assignment[target_doc]:
+            # Priemer existujúcich izieb
+            my_room_nums = [r[0] for r in assignment[target_doc]]
+            avg_pos = sum(my_room_nums) / len(my_room_nums)
+            # Nájdi izbu s najmenšou vzdialenosťou k priemeru
+            best_room = min(available_rooms, key=lambda r: abs(r[0] - avg_pos))
+        else:
+            # Ak nemá žiadne, daj prvú voľnú (alebo podľa poschodia/seniority)
+            best_room = available_rooms[0]
+            
         assignment[target_doc].append(best_room)
         current_beds[target_doc] += best_room[1]
-    
+        available_rooms.remove(best_room)
+
+    # Generovanie výstupu
     result_text, result_raw = {}, {}
     for doc in doctors_list:
         rooms = sorted(assignment[doc], key=lambda x: x[0])
         result_raw[doc] = [r[0] for r in rooms]
+        
+        room_str = ", ".join([str(r[0]) for r in rooms])
+        
+        suffix = ""
+        if doc == wolf_doc_name:
+             suffix = " + Wolf"
+        elif doc == head_doc:
+             suffix = " + RT oddelenie"
+             
+        # Ak nemá izby, ale má špeciálnu funkciu
         if not rooms:
-            if doc == head_doc and num_workers >= 3:
-                result_text[doc] = "RT oddelenie"
-            else:
-                result_text[doc] = "Wolf (0L)" if doc == wolf_doc_name else ""
+             if doc == wolf_doc_name: result_text[doc] = "Wolf (0L)"
+             elif doc == head_doc and num_workers >= 3: result_text[doc] = "RT oddelenie"
+             else: result_text[doc] = ""
         else:
-            room_str = ", ".join([str(r[0]) for r in rooms])
-            suffix = " + Wolf" if doc == wolf_doc_name else (" + RT oddelenie" if doc == head_doc else "")
-            result_text[doc] = f"{room_str}{suffix}"
+             result_text[doc] = f"{room_str}{suffix}"
+             
     return result_text, result_raw
 
 def get_ical_events(start_date, end_date):
@@ -864,37 +865,6 @@ def create_pdf_report(df, motto):
     doc.build(elements)
     buffer.seek(0)
     return buffer.getvalue()
-
-def send_email_with_pdf(pdf_bytes, filename, to_email, subject, body):
-    if "email" not in st.secrets:
-        st.error("Chýbajú nastavenia emailu")
-        return False
-    
-    from_email = st.secrets["email"]["username"]
-    password = st.secrets["email"]["password"]
-    
-    msg = MIMEMultipart()
-    msg['From'] = from_email
-    msg['To'] = to_email
-    msg['Subject'] = subject
-    msg.attach(MIMEText(body, 'plain'))
-    
-    part = MIMEBase('application', 'octet-stream')
-    part.set_payload(pdf_bytes)
-    encoders.encode_base64(part)
-    part.add_header('Content-Disposition', f'attachment; filename={filename}')
-    msg.attach(part)
-    
-    try:
-        server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()
-        server.login(from_email, password)
-        server.send_message(msg)
-        server.quit()
-        return True
-    except Exception as e:
-        st.error(f"Chyba: {e}")
-        return False
 
 # Pomocná funkcia na zoskupenie dátumov do intervalov
 def group_closures_to_intervals(closures_dict):
