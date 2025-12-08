@@ -14,20 +14,31 @@ from email import encoders
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 from openpyxl.utils import get_column_letter
+
+# --- REPORTLAB PRE PDF ---
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 
+# --- KONFIGURÁCIA ---
 CONFIG_FILE = 'hospital_config.json'
 HISTORY_FILE = 'room_history.json'
 PRIVATE_CALENDAR_URL = "https://calendar.google.com/calendar/ical/fntnonk%40gmail.com/private-e8ce4e0639a626387fff827edd26b87f/basic.ics"
-GIST_FILENAME_CONFIG = "hospital_config_v7.json"
-GIST_FILENAME_HISTORY = "room_history_v7.json"
 
-ROOMS_LIST = [(1, 3), (2, 3), (3, 3), (4, 3), (5, 3), (7, 1), (8, 3), (9, 3), (10, 1), (11, 1), (12, 2), (13, 2), (14, 2), (15, 2), (16, 2), (17, 2), (18, 3), (19, 3)]
+GIST_FILENAME_CONFIG = "hospital_config_v8.json"
+GIST_FILENAME_HISTORY = "room_history_v8.json"
+
+ROOMS_LIST = [
+    (1, 3), (2, 3), (3, 3), (4, 3), (5, 3),
+    (7, 1), (8, 3), (9, 3), (10, 1), (11, 1),
+    (12, 2), (13, 2), (14, 2), (15, 2), (16, 2), (17, 2),
+    (18, 3), (19, 3)
+]
+
 SENIOR_DOCTORS = ["Kurisova", "Vidulin", "Miklatkova"]
 
+# --- GIST ULOŽISKO ---
 def get_gist_id(filename):
     if "github" not in st.secrets: return None
     try:
@@ -61,7 +72,7 @@ def save_data_to_gist(filename, data):
 
 def _load_data(gist_filename, local_filename, default_factory):
     data = load_data_from_gist(gist_filename)
-    if data: return data
+    if  return data
     if os.path.exists(local_filename):
         try:
             with open(local_filename, 'r', encoding='utf-8') as f: return json.load(f)
@@ -500,8 +511,15 @@ if mode == "🚀 Generovať rozpis":
         if txt.strip(): manual_core_input[doc] = [int(p.strip()) for p in txt.split(',') if p.strip().isdigit()]
     if manual_core_input: st.session_state.manual_core[start_d.strftime('%Y-%m-%d')] = manual_core_input
     
-    c3, c4 = st.columns([1, 1])
-    if c3.button("🚀 Generovať rozpis", type="primary"):
+    # --- UPRAVENÁ HLAVNÁ SEKCIA TLAČIDIEL ---
+    c_btn1, c_btn2, c_btn3 = st.columns(3)
+    gen_clicked = c_btn1.button("🚀 Generovať rozpis", type="primary")
+    scan_clicked = c_btn2.button("🔭 Vyhliadka ďalších týždňov")
+    clear_hist = c_btn3.button("🗑️ Vymazať históriu")
+    
+    weeks_num = st.number_input("Počet týždňov pre vyhliadku:", min_value=1, max_value=52, value=12)
+
+    if gen_clicked:
         with st.spinner("Počítam..."):
             end_d = start_d + timedelta(days=14)
             absences = get_ical_events(datetime.combine(start_d, datetime.min.time()), datetime.combine(end_d, datetime.min.time()))
@@ -510,20 +528,19 @@ if mode == "🚀 Generovať rozpis":
             df_display.columns = ["Sekcia / Dátum"] + dates
             st.session_state.df_display = df_display
             st.success("✅ Hotovo!")
-    
-    if c4.button("🗑️ Vymazať históriu"): save_history({}); st.success("História vymazaná.")
-    
-    st.markdown("---")
-    st.subheader("🔍 Skenovanie problémov do budúcnosti")
-    weeks_num = st.number_input("Počet týždňov dopredu:", min_value=1, max_value=52, value=12)
-    if st.button("🔎 Skenovať"):
-        with st.spinner(f"Skenujem {weeks_num} týždňov..."):
+            
+    if scan_clicked:
+        with st.spinner(f"Pozerám {weeks_num} týždňov dopredu..."):
             problems_df = scan_future_problems(st.session_state.config, weeks_ahead=weeks_num)
             if problems_df is not None and not problems_df.empty:
-                st.warning(f"⚠️ Nájdených {len(problems_df)} problémových dní:")
+                st.subheader("🔭 Vyhliadka ďalších týždňov – problémové dni")
                 st.dataframe(problems_df, use_container_width=True, hide_index=True)
             else:
-                st.success("✅ Žiadne problémy nenájdené!")
+                st.success("✅ V zadanom období nie sú žiadne neobsadené pracoviská.")
+    
+    if clear_hist: 
+        save_history({})
+        st.success("História vymazaná.")
     
     if 'df_display' in st.session_state:
         st.markdown("---")
