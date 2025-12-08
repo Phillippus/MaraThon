@@ -656,7 +656,7 @@ def create_display_df(dates, data_grid, all_doctors, doctors_info, motto, config
     display_map = {
         "Radio 2A": "Radio 2A",          # Upravené podľa požiadavky
         "Prijmova": "Konziliárna amb.",  # Upravené podľa požiadavky
-        "Velka dispenzarna": "veľký dispenzár",
+        "Velka dispenzarna": "velký dispenzár",
         "Mala dispenzarna": "malý dispenzár"
     }
     
