@@ -143,6 +143,28 @@ def load_config():
             "default_body": "Dobrý deň,\nv prílohe rozpis.\nS pozdravom"
         }
         changed = True
+    
+    # Migrácia Prijmova -> Konziliarna ak existuje starý config
+    if "Prijmova" in config.get("ambulancie", {}):
+        config["ambulancie"]["Konziliarna"] = config["ambulancie"].pop("Prijmova")
+        # Update lekárov
+        for doc, props in config.get("lekari", {}).items():
+            if "moze" in props:
+                props["moze"] = ["Konziliarna" if x == "Prijmova" else x for x in props["moze"]]
+            if "pevne_dni" in props:
+                for day, amb in props["pevne_dni"].items():
+                    if amb == "Prijmova":
+                        props["pevne_dni"][day] = "Konziliarna"
+        changed = True
+
+    # Migrácia Chemo 8B na list, ak je dict
+    if "Chemo 8B" in config.get("ambulancie", {}):
+        prio = config["ambulancie"]["Chemo 8B"].get("priority")
+        if isinstance(prio, dict):
+             # Použijeme default list ako základ pre konverziu na editovateľný zoznam
+             config["ambulancie"]["Chemo 8B"]["priority"] = prio.get("default", ["Riedlova", "Kohutek", "Stratena", "Bystricky", "Vidulin", "Blahova"])
+             changed = True
+
     if changed:
         save_config(config)
     return config
@@ -176,7 +198,7 @@ def get_default_config():
             "default_body": "Dobrý deň,\nv prílohe rozpis.\nS pozdravom"
         },
         "ambulancie": {
-            "Prijmova": {
+            "Konziliarna": { # Premenované z Prijmova
                 "dni": ["Pondelok", "Utorok", "Streda", "Stvrtok", "Piatok"],
                 "priority": ["Kohutekova", "Kohutek", "Bystricky", "Zavrelova"]
             },
@@ -204,11 +226,8 @@ def get_default_config():
             },
             "Chemo 8B": {
                 "dni": ["Pondelok", "Utorok", "Streda", "Stvrtok", "Piatok"],
-                "priority": {
-                    "0": ["Kohutek", "Stratena", "Bystricky", "Vidulin", "Blahova"],
-                    "1": ["Kohutek", "Stratena", "Bystricky", "Vidulin", "Blahova"],
-                    "default": ["Riedlova", "Kohutek", "Stratena", "Bystricky", "Vidulin", "Blahova"]
-                }
+                # Zmenené na jednoduchý zoznam pre editovateľnosť
+                "priority": ["Riedlova", "Kohutek", "Stratena", "Bystricky", "Vidulin", "Blahova"]
             },
             "Chemo 8C": {
                 "dni": ["Utorok", "Streda", "Stvrtok"],
@@ -221,17 +240,17 @@ def get_default_config():
         },
         "lekari": {
             "Bystricky": {
-                "moze": ["Prijmova", "Velka dispenzarna", "Mala dispenzarna", "Radio 2A", "Chemo 8A", "Chemo 8B", "Chemo 8C", "Wolf"],
+                "moze": ["Konziliarna", "Velka dispenzarna", "Mala dispenzarna", "Radio 2A", "Chemo 8A", "Chemo 8B", "Chemo 8C", "Wolf"],
                 "active": True
             },
             "Kohutek": {
-                "moze": ["Oddelenie", "Prijmova", "Velka dispenzarna", "Mala dispenzarna", "Radio 2A", "Chemo 8A", "Chemo 8B", "Chemo 8C", "Wolf"],
+                "moze": ["Oddelenie", "Konziliarna", "Velka dispenzarna", "Mala dispenzarna", "Radio 2A", "Chemo 8A", "Chemo 8B", "Chemo 8C", "Wolf"],
                 "pevne_dni": {"Pondelok": "Chemo 8B", "Utorok": "Chemo 8B"},
                 "active": True
             },
             "Kohutekova": {
-                "moze": ["Prijmova"],
-                "pevne_dni": {"Pondelok": "Prijmova", "Utorok": "Prijmova", "Streda": "Prijmova", "Stvrtok": "Prijmova"},
+                "moze": ["Konziliarna"],
+                "pevne_dni": {"Pondelok": "Konziliarna", "Utorok": "Konziliarna", "Streda": "Konziliarna", "Stvrtok": "Konziliarna"},
                 "nepracuje": ["Piatok"],
                 "active": True
             },
@@ -242,7 +261,7 @@ def get_default_config():
                 "active": True
             },
             "Zavrelova": {
-                "moze": ["Radio 2A", "Prijmova"],
+                "moze": ["Radio 2A", "Konziliarna"],
                 "pevne_dni": {"Pondelok": "Radio 2A", "Utorok": "Radio 2A", "Streda": "Radio 2A", "Stvrtok": "Radio 2A", "Piatok": "Radio 2A"},
                 "active": True
             },
@@ -435,12 +454,12 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
         result_raw[doc] = [r[0] for r in rooms]
         if not rooms:
             if doc == head_doc and num_workers >= 3:
-                result_text[doc] = "RT odd."
+                result_text[doc] = "RT oddelenie"
             else:
                 result_text[doc] = "Wolf (0L)" if doc == wolf_doc_name else ""
         else:
             room_str = ", ".join([str(r[0]) for r in rooms])
-            suffix = " + Wolf" if doc == wolf_doc_name else (" + RT odd." if doc == head_doc else "")
+            suffix = " + Wolf" if doc == wolf_doc_name else (" + RT oddelenie" if doc == head_doc else "")
             result_text[doc] = f"{room_str}{suffix}"
     return result_text, result_raw
 
@@ -553,7 +572,8 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
                         assigned_amb[t] = doc
                 available.remove(doc)
         
-        ambs_to_process = ["Radio 2A", "Radio 2B", "Chemo 8B", "Chemo 8A", "Chemo 8C", "Wolf", "Prijmova", "Velka dispenzarna", "Mala dispenzarna"]
+        # Nahradené "Prijmova" za "Konziliarna"
+        ambs_to_process = ["Radio 2A", "Radio 2B", "Chemo 8B", "Chemo 8A", "Chemo 8C", "Wolf", "Konziliarna", "Velka dispenzarna", "Mala dispenzarna"]
         amb_scarcity = []
 
         for amb_name in ambs_to_process:
@@ -652,11 +672,10 @@ def create_display_df(dates, data_grid, all_doctors, doctors_info, motto, config
     rows = []
     ward_doctors = [d for d in all_doctors if "Oddelenie" in config['lekari'][d].get('moze', [])]
     
-    # 1. UPDATE DISPLAY MAP PRE RADIO 2A A PRIJMOVU
     display_map = {
-        "Radio 2A": "Radio 2A",          # Upravené podľa požiadavky
-        "Prijmova": "Konziliárna amb.",  # Upravené podľa požiadavky
-        "Velka dispenzarna": "velký dispenzár",
+        "Radio 2A": "Radio 2A",
+        "Konziliarna": "Konziliárna amb.", # Display map pre novú Prijmovu
+        "Velka dispenzarna": "veľký dispenzár",
         "Mala dispenzarna": "malý dispenzár"
     }
     
@@ -678,7 +697,7 @@ def create_display_df(dates, data_grid, all_doctors, doctors_info, motto, config
     rows.append([motto or "Motto"] + [""] * len(dates))
     
     sections = [
-        ("Konziliárna amb", ["Prijmova"]),
+        ("Konziliárna amb", ["Konziliarna"]), # Upravené ID
         ("RT ambulancie", ["Radio 2A", "Radio 2B"]),
         ("Chemo amb", ["Chemo 8A", "Chemo 8B", "Chemo 8C"]),
         ("Disp. Ambulancia", ["Velka dispenzarna", "Mala dispenzarna"]),
@@ -688,7 +707,6 @@ def create_display_df(dates, data_grid, all_doctors, doctors_info, motto, config
     for title, amb_list in sections:
         rows.append([title] + dates)
         for amb in amb_list:
-            # Tu aplikujeme display_map
             display_name = display_map.get(amb, amb)
             vals = []
             for date in dates:
@@ -739,10 +757,8 @@ def create_pdf_report(df, motto):
     """Generuje PDF s unicode podporou pre slovenčinu, zalomením textu a tesnejším rozložením"""
     buffer = io.BytesIO()
     
-    # Registruj font s unicode supportom
     font_name = setup_pdf_fonts()
     
-    # 2. OPTIMALIZÁCIA PRE 1 STRANU - menšie okraje
     doc = SimpleDocTemplate(
         buffer,
         pagesize=landscape(A4),
@@ -764,8 +780,6 @@ def create_pdf_report(df, motto):
         spaceAfter=10
     )
     
-    # 3. ZMENŠENIE PÍSMA A ZALOMENIE TEXTU
-    # Štýl pre bunky s Word Wrap (aby sa text neprekrýval)
     cell_style = ParagraphStyle(
         'CellStyle',
         parent=styles['Normal'],
@@ -798,18 +812,12 @@ def create_pdf_report(df, motto):
     title_text = f"Rozpis prác Onkologická klinika {df.columns[1]} - {df.columns[-1]}"
     elements.append(Paragraph(title_text, title_style))
     
-    # Príprava dát do formátu Paragraph pre Table
     data = []
-    
-    # Hlavička tabuľky
     header_row = [Paragraph(str(col), section_style) for col in df.columns]
     data.append(header_row)
     
-    # Dáta tabuľky
     for idx, row in df.iterrows():
         row_data = []
-        
-        # Identifikácia typu riadku pre štýlovanie
         row_label = str(row[0])
         is_section_header = row_label in ["Oddelenie", "Konziliárna amb", "RT ambulancie", "Chemo amb", "Disp. Ambulancia", "RTG Terapia"]
         is_motto = (row_label == (motto or "Motto"))
@@ -820,21 +828,18 @@ def create_pdf_report(df, motto):
             if is_section_header:
                 p = Paragraph(txt, section_style)
             elif is_motto:
-                if i == 0: # Motto text len v prvej bunke, ostatné budú merged
+                if i == 0:
                      p = Paragraph(txt, ParagraphStyle('Motto', parent=cell_style, fontName=font_name, fontSize=8, padding=5))
                 else:
                      p = "" 
-            elif i == 0: # Prvý stĺpec (mená lekárov) - trochu bold
+            elif i == 0:
                  p = Paragraph(f"<b>{txt}</b>", cell_style)
-            else: # Bežné bunky s dátami (izby)
+            else:
                  p = Paragraph(txt, cell_style)
                  
             row_data.append(p)
         data.append(row_data)
     
-    # Výpočet šírok stĺpcov pre celú šírku A4 Landscape
-    # A4 Landscape width = 842 bodov. Okraje 10+10. Využiteľné = 822 bodov.
-    # Máme 6 stĺpcov (1 meno + 5 dní)
     available_width = 820
     col_widths = [available_width * 0.16] + [available_width * 0.168] * (len(df.columns) - 1)
     
@@ -848,9 +853,8 @@ def create_pdf_report(df, motto):
         ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
     ])
     
-    # Aplikovanie pozadia pre sekcie
     for i, row in enumerate(df.iterrows()):
-        table_row_idx = i + 1 # +1 kvôli hlavičke
+        table_row_idx = i + 1
         row_val = row[1][0]
         
         if row_val in ["Oddelenie", "Konziliárna amb", "RT ambulancie", "Chemo amb", "Disp. Ambulancia", "RTG Terapia"]:
