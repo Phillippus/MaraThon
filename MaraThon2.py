@@ -337,7 +337,9 @@ def migrate_homolova_to_vidulin(config):
 
 def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, manual_core=None):
     """
-    Vylepšená distribúcia izieb s férovým vyvažovaním záťaže (Fair Share) a limitom pre RT.
+    Vylepšená distribúcia izieb s "Robin Hood" mechanizmom:
+    Ak je niekto "hladný" (má 0 izieb z minula), bohatí (čo majú veľa izieb) musia
+    povinne odovzdať izby do spoločného banku, aby sa vyrovnali.
     """
     if not doctors_list:
         return {}, {}
@@ -349,13 +351,11 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
     # Identifikácia rolí
     head_doc = "Kurisova" if "Kurisova" in doctors_list else ("Miklatkova" if "Miklatkova" in doctors_list else None)
     deputy_doc = "Kohutek" if "Kohutek" in doctors_list else None
-    
-    # Kto je RT pomoc/zodpovedný?
     rt_help_doc = "Miklatkova" if "Miklatkova" in doctors_list else None
     
     assignment = {d: [] for d in doctors_list}
     current_beds = {d: 0 for d in doctors_list}
-    available_rooms = sorted(ROOMS_LIST, key=lambda x: x[0]) # Zoradené podľa čísla izby
+    available_rooms = sorted(ROOMS_LIST, key=lambda x: x[0]) 
     
     # --- 1. Manuálne pridelenie (Core) ---
     for doc, nums in manual_core.items():
@@ -369,38 +369,47 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
     
     # Definícia aktívnych prijímateľov izieb
     active_assignees = [d for d in doctors_list]
-    
     pure_workers = [d for d in doctors_list if d not in ["Kurisova", "Kohutek"]]
     num_workers = len(pure_workers)
     
-    # Ak je dosť ľudí (aspoň 2 okrem primára), primár neberie izby, ALE len ak nie je RT
     if num_workers >= 2 and head_doc in active_assignees and head_doc != rt_help_doc:
         active_assignees.remove(head_doc)
     
     if not active_assignees: 
-        active_assignees = doctors_list # Fallback
+        active_assignees = doctors_list
 
     # --- DEFINÍCIA LIMITOV (CAPS) ---
     caps = {}
     for d in active_assignees:
-        if d == rt_help_doc:
+        if d == rt_help_doc or d == wolf_doc_name:
             caps[d] = 12
-        elif d == wolf_doc_name:
-            caps[d] = 12 
         else:
             caps[d] = 100 
 
-    # --- Výpočet SOFT LIMITU pre kontinuitu ---
-    # Aby sme predišli tomu, že si niekto "naškrečkuje" všetky izby z minulosti
-    # a ostatným (napr. Vidulin) nič neostane.
-    total_beds_available = sum(r[1] for r in available_rooms) # Zatiaľ voľné
-    # Prirátame už obsadené (manual core) pre presnejší priemer
+    # --- ROBIN HOOD MECHANIZMUS ---
+    # Zistíme, či je tu niekto, kto by mal mať veľa izieb (limit > 12), ale má 0 (z minula).
+    starving_doctors = False
+    for d in active_assignees:
+        if caps[d] > 12: # Je to plnohodnotný lekár (nie RT)
+            # Ak nemá žiadne izby v core a nemal ani v minulosti (alebo má 0)
+            if current_beds[d] == 0:
+                 starving_doctors = True
+                 break
+
+    # Výpočet limitu pre kontinuitu
     total_beds_total = sum(r[1] for r in ROOMS_LIST)
+    active_full_time_count = len([d for d in active_assignees if caps[d] > 12])
+    if active_full_time_count == 0: active_full_time_count = 1
     
-    # Priemer na lekára
-    avg_beds = total_beds_total / max(len(active_assignees), 1)
-    # Povolíme mierne prekročenie priemeru kvôli kontinuite (napr. 1.3x), ale nie monopoly
-    soft_continuity_limit = max(avg_beds * 1.3, 8) 
+    avg_load = total_beds_total / active_full_time_count
+    
+    # Ak je niekto "hladný" (Vidulin), nastavíme tvrdý limit.
+    # Nikto si nesmie z minula nechať viac ako priemer - 2 lôžka (aby ostalo dosť v banku).
+    if starving_doctors:
+        soft_continuity_limit = max(avg_load - 2, 4) 
+    else:
+        # Inak môžeme byť benevolentnejší
+        soft_continuity_limit = max(avg_load * 1.2, 8)
 
     # --- 2. Kontinuita (zachovanie izieb z minulosti) s OBMEDZENÍM ---
     if previous_assignments:
@@ -418,27 +427,28 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
                     # Prísna kontrola pre RT (12)
                     hard_limit = caps.get(doc, 100)
                     
-                    # Kontrola Soft limitu pre kontinuitu (aby neobsadili všetko)
-                    # Ak lekár už má dosť izieb (nad soft limit), ďalšie staré mu nedáme,
-                    # aby ostali voľné pre tých, čo nemajú nič.
+                    # Kontrola Robin Hood limitu
                     if (current_beds[doc] + r_obj[1] <= hard_limit) and \
                        (current_beds[doc] + r_obj[1] <= soft_continuity_limit):
                         assignment[doc].append(r_obj)
                         current_beds[doc] += r_obj[1]
                         available_rooms.remove(r_obj)
+                    else:
+                        pass # Izba prepadá do spoločného banku
 
-    # --- 3. Rozdelenie zvyšných izieb (AGRESÍVNE Fair Share) ---
+    # --- 3. Rozdelenie zvyšných izieb (Fair Share) ---
     while available_rooms:
+        # Kandidáti sú tí, ktorí nemajú plno
         candidates = [d for d in active_assignees if current_beds[d] < caps.get(d, 100)]
         
         if not candidates:
              candidates = active_assignees
 
         # VYLEPŠENÝ SORT:
-        # 1. Podľa počtu lôžok (najmenej prvý)
-        # 2. Ak je zhoda, uprednostni Vidulin (aby dobehla, ak mala predtým 0)
+        # 1. Podľa počtu lôžok (najmenej prvý) -> Tým pádom Vidulin (0) pôjde prvá
+        # 2. Ak je zhoda, uprednostni Vidulin
         def sort_key(d):
-             is_vidulin = 0 if d == "Vidulin" else 1 # Vidulin bude mať 0, ostatní 1 -> pri zhode lôžok ide prvá
+             is_vidulin = 0 if d == "Vidulin" else 1 
              return (current_beds[d], is_vidulin)
         
         candidates.sort(key=sort_key)
@@ -449,8 +459,9 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
         fitting_rooms = [r for r in available_rooms if r[1] <= beds_left]
         
         if not fitting_rooms and caps.get(target_doc, 100) < 100:
+             # Fallback pre RT limit
              if len(candidates) > 1:
-                 target_doc = candidates[1]
+                 target_doc = candidates[1] # Skús ďalšieho
                  beds_left = caps.get(target_doc, 100) - current_beds[target_doc]
                  fitting_rooms = [r for r in available_rooms if r[1] <= beds_left]
              
@@ -484,10 +495,9 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
              suffix = " + Wolf"
         elif doc == head_doc:
              suffix = " + RT oddelenie"
-        elif doc == rt_help_doc: # Miklatkova
+        elif doc == rt_help_doc: 
              suffix = " + RT oddelenie"
              
-        # Ak nemá izby
         if not rooms:
              if doc == wolf_doc_name: result_text[doc] = "Wolf (0L)"
              elif doc == head_doc and num_workers >= 3: result_text[doc] = "RT oddelenie"
