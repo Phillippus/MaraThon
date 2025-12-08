@@ -337,8 +337,8 @@ def migrate_homolova_to_vidulin(config):
 
 def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, manual_core=None):
     """
-    Ultimátna spravodlivosť: Kontinuita je tvrdo podriadená priemeru.
-    Cieľ: Nikto nesmie mať výrazne viac ako priemer, aby zostali izby pre navrátilcov.
+    PRÍSNY REŽIM: Kontinuita je povolená LEN do výšky priemeru.
+    Žiadna tolerancia navyše.
     """
     if not doctors_list:
         return {}, {}
@@ -394,9 +394,9 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
     # Priemerný počet lôžok na jedného "plného" lekára
     average_load = total_beds_total / active_full_time_count
     
-    # TVRDÝ limit pre kontinuitu = priemer + len 2 lôžka tolerancie.
-    # Všetko nad toto sa berie a hádže do placu.
-    soft_continuity_limit = average_load + 2.0
+    # KĽÚČOVÁ OPRAVA: Limit je presne priemer. Žiadna tolerancia +2.0.
+    # Týmto sa vynúti uvoľnenie izieb, ak má niekto 15 a priemer je 14.
+    soft_continuity_limit = average_load 
 
     # --- 2. Kontinuita (zachovanie izieb z minulosti) s OBMEDZENÍM ---
     if previous_assignments:
@@ -413,29 +413,24 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
                 for r_obj in my_prev_rooms:
                     hard_limit = caps.get(doc, 100)
                     
-                    # KĽÚČOVÁ PODMIENKA:
-                    # Ak by pridaním izby lekár prekročil "spravodlivý podiel", izbu mu nedáme.
-                    # Tým pádom sa uvoľní pre niekoho, kto má 0.
+                    # Ak pridanie izby neprekročí tvrdý limit ANI priemer, ok.
                     if (current_beds[doc] + r_obj[1] <= hard_limit) and \
                        (current_beds[doc] + r_obj[1] <= soft_continuity_limit):
                         assignment[doc].append(r_obj)
                         current_beds[doc] += r_obj[1]
                         available_rooms.remove(r_obj)
                     else:
-                        # Izba sa uvoľní pre chudobných
+                        # Izba sa uvoľní pre chudobných (Vidulin)
                         pass 
 
     # --- 3. Rozdelenie zvyšných izieb (Dorovnávanie) ---
     while available_rooms:
-        # Kandidáti sú tí, ktorí nemajú plno
         candidates = [d for d in active_assignees if current_beds[d] < caps.get(d, 100)]
         
         if not candidates:
              candidates = active_assignees
 
-        # VYLEPŠENÝ SORT:
-        # Najprv tí, čo majú najmenej lôžok. Tým pádom ten, čo prišiel z dovolenky (0),
-        # bude brať všetko rad za radom, kým nedobehne ostatných.
+        # VYLEPŠENÝ SORT: Kto má najmenej, berie prvé.
         candidates.sort(key=lambda d: (current_beds[d], d))
         
         target_doc = candidates[0]
