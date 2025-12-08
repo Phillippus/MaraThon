@@ -798,7 +798,6 @@ def create_pdf_report(df, motto):
     elements = []
     styles = getSampleStyleSheet()
     
-    # Prispôsobený Title štýl s naším fontom
     title = f"Rozpis prác Onkologická klinika {df.columns[1]} - {df.columns[-1]}"
     title_style = styles['Title']
     title_style.fontName = font_bold
@@ -808,7 +807,6 @@ def create_pdf_report(df, motto):
     
     data = [df.columns.tolist()] + df.values.tolist()
     
-    # Kalkulácia šírky stĺpcov
     available_width = 810
     num_cols = len(df.columns)
     first_col_width = 110
@@ -880,7 +878,7 @@ def send_email_with_pdf(pdf_bytes, filename, to_email, subject, body):
         st.error(f"Chyba pri odosielaní: {e}")
         return False
 
-# --- UI LOGIKA ---
+# --- UI LOGIKA (Obnovené rozloženie) ---
 def main():
     st.set_page_config(layout="wide", page_title="Hospital Scheduler Pro")
     
@@ -889,30 +887,49 @@ def main():
         
     config = st.session_state.config
     
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📅 Rozpis", "⚙️ Nastavenia", "✏️ Editor", "👥 Zamestnanci", "📋 Audit"])
+    # Sidebar navigácia (klasický štýl)
+    st.sidebar.title("🏥 Navigácia")
+    page = st.sidebar.radio("Prejsť na:", ["📅 Generátor Rozpisu", "⚙️ Nastavenia Ambulancií", "✏️ Manuálny Editor", "👥 Správa Lekárov", "📋 Audit Problémov"])
     
-    with tab1:
+    st.sidebar.divider()
+    
+    if page == "📅 Generátor Rozpisu":
         st.title("Generátor Rozpisu Služieb")
-        d = st.date_input("Vyber dátum (týždeň)", datetime.now())
-        motto = st.text_input("Motto týždňa", "Motto: S úsmevom ide všetko ľahšie")
+        
+        # Ovládacie prvky v Sidebare
+        st.sidebar.subheader("Vstupné parametre")
+        d = st.sidebar.date_input("Vyber dátum (týždeň)", datetime.now())
+        motto = st.sidebar.text_input("Motto týždňa", "Motto: S úsmevom ide všetko ľahšie")
         st.session_state['motto'] = motto
         
-        if st.button("Generovať rozpis"):
+        if st.sidebar.button("🚀 Generovať rozpis", type="primary"):
             start_date = d - timedelta(days=d.weekday()) + timedelta(days=3)
             end_date = start_date + timedelta(days=6)
-            absences = get_ical_events(start_date, end_date)
             
-            dates, data_grid, all_docs, info = generate_data_structure(config, absences, start_date)
-            df = create_display_df(dates, data_grid, all_docs, info, motto, config)
+            with st.spinner("Načítavam dáta a generujem..."):
+                absences = get_ical_events(start_date, end_date)
+                dates, data_grid, all_docs, info = generate_data_structure(config, absences, start_date)
+                df = create_display_df(dates, data_grid, all_docs, info, motto, config)
+                
+                # Uloženie do session state aby to nezmizlo pri prekliku
+                st.session_state['last_df'] = df
+                st.session_state['last_dates'] = dates
             
-            st.dataframe(df, use_container_width=True)
+        # Zobrazenie výsledku (ak existuje)
+        if 'last_df' in st.session_state:
+            df = st.session_state['last_df']
+            dates = st.session_state['last_dates']
+            
+            st.dataframe(df, use_container_width=True, height=600)
+            
+            st.divider()
+            st.subheader("Export a Akcie")
             
             col1, col2, col3 = st.columns(3)
             with col1:
                 excel_data = create_excel_report(df)
                 st.download_button("📥 Stiahnuť Excel", excel_data, f"Rozpis_{dates[0]}_{dates[-1]}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
             with col2:
-                # Generovanie s novým fontom
                 pdf_data = create_pdf_report(df, motto)
                 st.download_button("📄 Stiahnuť PDF", pdf_data, f"Rozpis_{dates[0]}_{dates[-1]}.pdf", "application/pdf")
             with col3:
@@ -920,12 +937,14 @@ def main():
                     email_to = st.text_input("Komu", config['email_settings']['default_to'])
                     subject = st.text_input("Predmet", f"Rozpis {dates[0]} - {dates[-1]}")
                     body = st.text_area("Správa", config['email_settings']['default_body'])
-                    if st.button("Odoslať"):
-                        if send_email_with_pdf(pdf_data, f"Rozpis_{dates[0]}_{dates[-1]}.pdf", email_to, subject, body):
+                    if st.button("Odoslať email"):
+                        # Regenerate PDF to be sure (or use cached if stored)
+                        pdf_data_mail = create_pdf_report(df, motto)
+                        if send_email_with_pdf(pdf_data_mail, f"Rozpis_{dates[0]}_{dates[-1]}.pdf", email_to, subject, body):
                             st.success("Odoslané!")
 
-    with tab2:
-        st.header("Nastavenia Ambulancií")
+    elif page == "⚙️ Nastavenia Ambulancií":
+        st.title("Nastavenia Ambulancií")
         amb_names = list(config['ambulancie'].keys())
         sel_amb = st.selectbox("Vyber ambulanciu", amb_names)
         
@@ -936,9 +955,9 @@ def main():
                 config['ambulancie'][sel_amb]['priority'] = new_prio
                 save_config(config)
                 st.success("Uložené!")
-
+        
         st.divider()
-        st.header("Zatvorenie prevádzky")
+        st.subheader("Zatvorenie prevádzky")
         c_date = st.date_input("Dátum zatvorenia")
         reason = st.text_input("Dôvod/Ambulancia", "Sviatok")
         if st.button("Pridať zatvorenie"):
@@ -948,27 +967,33 @@ def main():
             save_config(config)
             st.success("Pridané")
 
-    with tab3:
-        st.header("Manuálne úpravy")
-        st.info("Klikni na 'Generovať rozpis' v prvom tabe pre načítanie dát do editora.")
+    elif page == "✏️ Manuálny Editor":
+        st.title("Manuálne úpravy")
+        st.info("Najskôr vygenerujte rozpis v sekcii 'Generátor', potom sa tu zobrazia možnosti úprav (ak je implementované).")
 
-    with tab4:
-        st.header("Správa lekárov")
-        for doc, props in config['lekari'].items():
-            with st.expander(f"MUDr. {doc}"):
-                act = st.checkbox("Aktívny", value=props.get('active', True), key=f"act_{doc}")
-                if act != props.get('active', True):
-                    config['lekari'][doc]['active'] = act
-                    save_config(config)
-                    st.rerun()
+    elif page == "👥 Správa Lekárov":
+        st.title("Správa lekárov")
+        cols = st.columns(3)
+        docs = list(config['lekari'].items())
+        
+        # Rozloženie do stĺpcov pre lepší vzhľad
+        for i, (doc, props) in enumerate(docs):
+            with cols[i % 3]:
+                with st.expander(f"MUDr. {doc}"):
+                    act = st.checkbox("Aktívny", value=props.get('active', True), key=f"act_{doc}")
+                    if act != props.get('active', True):
+                        config['lekari'][doc]['active'] = act
+                        save_config(config)
+                        st.rerun()
 
-    with tab5:
-        st.header("Kontrola budúcich problémov")
-        if st.button("Scanovať budúce týždne"):
-            problems = scan_future_problems(config)
+    elif page == "📋 Audit Problémov":
+        st.title("Kontrola budúcich problémov")
+        if st.button("Spustiť kontrolu na 12 týždňov"):
+            with st.spinner("Analyzujem..."):
+                problems = scan_future_problems(config)
             if problems is not None:
                 st.error(f"Nájdených {len(problems)} problémov!")
-                st.dataframe(problems)
+                st.dataframe(problems, use_container_width=True)
             else:
                 st.success("Žiadne problémy na najbližších 12 týždňov.")
 
