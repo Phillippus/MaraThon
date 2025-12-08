@@ -337,10 +337,8 @@ def migrate_homolova_to_vidulin(config):
 
 def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, manual_core=None):
     """
-    Spravodlivá distribúcia izieb s obmedzenou kontinuitou.
-    Cieľ: Aby sa izby rozdelili rovnomerne aj keď niekto príde z dovolenky.
-    Mechanizmus: Kontinuita je povolená len do výšky priemerného počtu lôžok.
-    Zvyšok sa rozdelí tým, čo majú najmenej.
+    Ultimátna spravodlivosť: Kontinuita je tvrdo podriadená priemeru.
+    Cieľ: Nikto nesmie mať výrazne viac ako priemer, aby zostali izby pre navrátilcov.
     """
     if not doctors_list:
         return {}, {}
@@ -394,13 +392,11 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
     total_beds_total = sum(r[1] for r in ROOMS_LIST)
     
     # Priemerný počet lôžok na jedného "plného" lekára
-    # Ak je 42 lôžok a 3 lekári, average_load = 14.
     average_load = total_beds_total / active_full_time_count
     
-    # Soft limit pre kontinuitu = priemer + malá tolerancia (napr. 1 lôžko)
-    # Ak má lekár z minulosti 20 lôžok, algoritmus mu dovolí nechať si len cca 15.
-    # Zvyšných 5 mu vezme, aby ich mohol dať tomu, čo prišiel z dovolenky.
-    soft_continuity_limit = average_load + 1.0
+    # TVRDÝ limit pre kontinuitu = priemer + len 2 lôžka tolerancie.
+    # Všetko nad toto sa berie a hádže do placu.
+    soft_continuity_limit = average_load + 2.0
 
     # --- 2. Kontinuita (zachovanie izieb z minulosti) s OBMEDZENÍM ---
     if previous_assignments:
@@ -417,18 +413,19 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
                 for r_obj in my_prev_rooms:
                     hard_limit = caps.get(doc, 100)
                     
-                    # KĽÚČOVÁ ZMENA:
-                    # Izbu priradíme, len ak tým neprekročíme ani Hard Limit, ani Soft Continuity Limit.
+                    # KĽÚČOVÁ PODMIENKA:
+                    # Ak by pridaním izby lekár prekročil "spravodlivý podiel", izbu mu nedáme.
+                    # Tým pádom sa uvoľní pre niekoho, kto má 0.
                     if (current_beds[doc] + r_obj[1] <= hard_limit) and \
                        (current_beds[doc] + r_obj[1] <= soft_continuity_limit):
                         assignment[doc].append(r_obj)
                         current_beds[doc] += r_obj[1]
                         available_rooms.remove(r_obj)
                     else:
-                        # Izba sa uvoľní do obehu pre tých, čo majú málo (napr. po dovolenke)
+                        # Izba sa uvoľní pre chudobných
                         pass 
 
-    # --- 3. Rozdelenie zvyšných izieb (Fair Share) ---
+    # --- 3. Rozdelenie zvyšných izieb (Dorovnávanie) ---
     while available_rooms:
         # Kandidáti sú tí, ktorí nemajú plno
         candidates = [d for d in active_assignees if current_beds[d] < caps.get(d, 100)]
@@ -436,11 +433,9 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
         if not candidates:
              candidates = active_assignees
 
-        # VYLEPŠENÝ SORT PRE SPRAVODLIVOSŤ:
-        # 1. Priorita: Kto má najmenej lôžok (current_beds)
-        # 2. Priorita: Abecedne (len aby to bolo deterministické)
-        # Týmto sa zabezpečí, že ten, kto prišiel z dovolenky (má 0), bude dostávať izby ako prvý,
-        # až kým nedobehne ostatných.
+        # VYLEPŠENÝ SORT:
+        # Najprv tí, čo majú najmenej lôžok. Tým pádom ten, čo prišiel z dovolenky (0),
+        # bude brať všetko rad za radom, kým nedobehne ostatných.
         candidates.sort(key=lambda d: (current_beds[d], d))
         
         target_doc = candidates[0]
@@ -449,23 +444,17 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
         beds_left = caps.get(target_doc, 100) - current_beds[target_doc]
         fitting_rooms = [r for r in available_rooms if r[1] <= beds_left]
         
-        # Ak sa nezmestí žiadna izba pod limit
         if not fitting_rooms and caps.get(target_doc, 100) < 100:
-             # Skúsime druhého v poradí
              if len(candidates) > 1:
                  target_doc = candidates[1]
                  beds_left = caps.get(target_doc, 100) - current_beds[target_doc]
                  fitting_rooms = [r for r in available_rooms if r[1] <= beds_left]
              
-             # Ak stále nič a limit je mäkký (100), vezmeme hocičo
              if not fitting_rooms and caps.get(target_doc, 100) == 100:
                  fitting_rooms = available_rooms
 
         if not fitting_rooms:
-            # Ak sa už nikomu nič nezmestí pod limity (RT/Wolf), musíme to niekomu dať "nasilu"
-            # alebo to ostane neobsadené (čo nechceme). Dáme to tomu s najväčšou kapacitou.
             fitting_rooms = available_rooms
-            # Preistotu preusporiadame kandidátov na tých s full kapacitou
             full_cap_candidates = [d for d in candidates if caps[d] >= 100]
             if full_cap_candidates:
                 target_doc = min(full_cap_candidates, key=lambda d: current_beds[d])
