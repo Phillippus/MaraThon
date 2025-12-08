@@ -14,6 +14,8 @@ from email import encoders
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 from openpyxl.utils import get_column_letter
+import random
+import math
 
 # --- REPORTLAB PRE PDF + UNICODE ---
 from reportlab.lib import colors
@@ -23,14 +25,13 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 import urllib.request
-import math
 
 # --- KONFIGURÁCIA ---
 CONFIG_FILE = 'hospital_config.json'
 HISTORY_FILE = 'room_history.json'
 PRIVATE_CALENDAR_URL = "https://calendar.google.com/calendar/ical/fntnonk%40gmail.com/private-e8ce4e0639a626387fff827edd26b87f/basic.ics"
-GIST_FILENAME_CONFIG = "hospital_config_v11.json"
-GIST_FILENAME_HISTORY = "room_history_v11.json"
+GIST_FILENAME_CONFIG = "hospital_config_v12.json"
+GIST_FILENAME_HISTORY = "room_history_v12.json"
 
 ROOMS_LIST = [
     (1, 3), (2, 3), (3, 3), (4, 3), (5, 3),
@@ -191,19 +192,14 @@ def migrate_homolova_to_vidulin(config):
 
 def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, manual_core=None):
     """
-    LOGIKA ROBIN HOOD:
-    1. Identifikuj 'RT' lekárov s limitom (Miklatkova) a 'Full' lekárov (Hunakova, Kacurova, Vidulin).
-    2. Odpočítaj kapacitu RT lekárov od celku.
-    3. Zvyšok rozdeľ ROVNO medzi Full lekárov.
-    4. Ak má Full lekár viac ako tento podiel, ODOBER mu nadbytok.
-    5. Pridel uvoľnené izby tomu, kto má najmenej.
+    LOGIKA NULOVÁ TOLERANCIA:
+    Ak je detekovaná nerovnováha (návrat z dovolenky), ignoruje sa kontinuita.
+    Tým, čo majú veľa, sa NÁHODNE odoberú izby, až kým neklesnú na priemer.
     """
-    if not doctors_list:
-        return {}, {}
+    if not doctors_list: return {}, {}
     if manual_core is None: manual_core = {}
     if previous_assignments is None: previous_assignments = {}
     
-    # Špeciálne roly
     rt_help_doc = "Miklatkova" if "Miklatkova" in doctors_list else None
     head_doc = "Kurisova" if "Kurisova" in doctors_list else None
     
@@ -211,7 +207,7 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
     current_beds = {d: 0 for d in doctors_list}
     available_rooms = sorted(ROOMS_LIST, key=lambda x: x[0]) 
     
-    # --- 1. Manuálne pridelenie (Core) ---
+    # 1. Manuálne pridelenie (Core)
     for doc, nums in manual_core.items():
         if doc not in doctors_list: continue
         for num in nums:
@@ -221,114 +217,107 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
             current_beds[doc] += r_obj[1]
             available_rooms.remove(r_obj)
     
-    # --- Identifikácia skupín ---
-    # RT skupina (má limit, napr. 12 lôžok)
+    # 2. Výpočet TARGETS
     rt_group = [d for d in doctors_list if d == rt_help_doc or d == wolf_doc_name]
-    
-    # Full skupina (zvyšok, delia si zvyšok rovným dielom)
     full_group = [d for d in doctors_list if d not in rt_group and d != head_doc]
-    if head_doc and head_doc not in rt_group and len(full_group) < 2:
-         full_group.append(head_doc) # Ak je málo ľudí, aj vedúca robí full
-         
-    # --- Výpočet cieľov (TARGETS) ---
+    if head_doc and head_doc not in rt_group and len(full_group) < 2: full_group.append(head_doc)
+    
     total_beds = sum(r[1] for r in ROOMS_LIST)
     targets = {}
-    
-    # 1. RT lekári majú fixný strop (napr. 10-12 lôžok)
     used_by_rt = 0
+    
+    # RT lekári - limit 10
     for d in rt_group:
-        targets[d] = 10 # Znížené z 12 na 10, aby ostalo viac pre ostatných
+        targets[d] = 10 
         used_by_rt += targets[d]
         
-    # 2. Zvyšok sa delí medzi Full lekárov
+    # Full lekári - zvyšok rovno
     beds_for_full = total_beds - used_by_rt
     if full_group:
-        fair_share = beds_for_full / len(full_group)
-        for d in full_group:
-            targets[d] = math.floor(fair_share) # Každý dostane rovnako
-    
-    # Korekcia pre vedúcu (ak je navyše)
-    if head_doc and head_doc not in targets:
-        targets[head_doc] = 0 # Vedúca robí len ak musí
+        fair_share = math.floor(beds_for_full / len(full_group))
+        for d in full_group: targets[d] = fair_share
 
-    # --- 2. Kontinuita s TVRDÝM OREZANÍM (Robin Hood) ---
+    if head_doc and head_doc not in targets: targets[head_doc] = 0
+
+    # 3. Kontinuita s "KRÁDEŽOU"
     if previous_assignments:
-        # Zoradíme lekárov: Najprv tí, čo majú najviac z minulosti (aby sme im brali)
-        # Ale iterujeme cez available_rooms v podstate...
-        
+        # Prechádzame lekárov
         for doc in doctors_list:
             if doc in previous_assignments:
-                # Získaj moje staré izby
-                my_prev_rooms_ids = previous_assignments[doc]
-                my_prev_rooms_objs = []
-                for r_id in my_prev_rooms_ids:
+                # Získaj ich izby
+                my_prev = []
+                for r_id in previous_assignments[doc]:
                     found = next((r for r in available_rooms if r[0] == r_id), None)
-                    if found: my_prev_rooms_objs.append(found)
+                    if found: my_prev.append(found)
                 
-                # Zoradíme izby
-                my_prev_rooms_objs.sort(key=lambda x: x[0])
+                # Zistíme, koľko môžu mať max
+                my_target = targets.get(doc, 100)
                 
-                for r_obj in my_prev_rooms_objs:
-                    my_target = targets.get(doc, 100)
+                # Ak majú viac ako target -> NÁHODNE zamiešame a vyberieme len toľko, koľko sa zmestí
+                current_load_from_core = current_beds[doc]
+                allowed_capacity = my_target - current_load_from_core
+                
+                if allowed_capacity <= 0:
+                    # Už majú plno z core, všetko z minulosti pustia
+                    pass
+                else:
+                    # Zamiešame, aby to nebolo stále tie isté
+                    random.shuffle(my_prev)
                     
-                    # AK MÁŠ VIAC AKO TARGET -> IZBA SA TI BERIE (nepridelí sa ti)
-                    if current_beds[doc] + r_obj[1] <= my_target:
-                        assignment[doc].append(r_obj)
-                        current_beds[doc] += r_obj[1]
-                        available_rooms.remove(r_obj)
-                    else:
-                        # Izba ostáva v available_rooms pre chudobných
-                        pass
+                    kept_rooms = []
+                    load_so_far = 0
+                    
+                    for r_obj in my_prev:
+                        if load_so_far + r_obj[1] <= allowed_capacity:
+                            kept_rooms.append(r_obj)
+                            load_so_far += r_obj[1]
+                        else:
+                            # Tieto izby sa "ukradnú" a ostanú v available_rooms
+                            pass
+                    
+                    # Priradíme tie, čo prežili čistku
+                    for r in kept_rooms:
+                        assignment[doc].append(r)
+                        current_beds[doc] += r[1]
+                        available_rooms.remove(r)
 
-    # --- 3. Rozdelenie zvyšných izieb (Dorovnávanie do Targetu) ---
-    # Prioritu má ten, kto je najďalej od svojho cieľa
+    # 4. Dorovnávanie (pre tých, čo majú málo - napr. Vidulin)
     while available_rooms:
-        # Kandidáti sú tí, čo ešte nedosiahli svoj target
         candidates = [d for d in doctors_list if current_beds[d] < targets.get(d, 100)]
-        
-        if not candidates:
-             # Ak majú všetci full, tak daj tomu, kto má najmenej absolútne
-             candidates = doctors_list
+        if not candidates: candidates = doctors_list
 
-        # Zoradiť podľa % naplnenia cieľa (alebo absolútneho počtu pre jednoduchosť)
+        # Najprv ten, kto má absolútne najmenej
         candidates.sort(key=lambda d: current_beds[d])
-        
         receiver = candidates[0]
         
-        # Nájdi najvhodnejšiu izbu
-        # Ak má receiver už izby, hľadaj blízku. Ak nie, hocijakú.
+        # Ak už má izby, skúsime nájsť blízku, inak prvú voľnú
+        best_room = available_rooms[0]
         if assignment[receiver]:
-            my_room_nums = [r[0] for r in assignment[receiver]]
-            avg_pos = sum(my_room_nums) / len(my_room_nums)
-            # Vyber izbu, ktorá je blízko priemeru a nezaplní ho príliš nad target (ak sa dá)
-            # Ale prioritne berie hocičo, aby sa zaplnil.
-            best_room = min(available_rooms, key=lambda r: abs(r[0] - avg_pos))
-        else:
-            best_room = available_rooms[0]
+            avgs = sum(r[0] for r in assignment[receiver]) / len(assignment[receiver])
+            best_room = min(available_rooms, key=lambda r: abs(r[0] - avgs))
             
         assignment[receiver].append(best_room)
         current_beds[receiver] += best_room[1]
         available_rooms.remove(best_room)
 
-    # --- Generovanie výstupu ---
+    # Výstup
     result_text, result_raw = {}, {}
     for doc in doctors_list:
         rooms = sorted(assignment[doc], key=lambda x: x[0])
         result_raw[doc] = [r[0] for r in rooms]
+        r_str = ", ".join([str(r[0]) for r in rooms])
+        suf = ""
+        if doc == wolf_doc_name: suf = " + Wolf"
+        elif doc == head_doc and "RT" not in suf: suf = " + RT oddelenie"
+        elif doc == rt_help_doc: suf = " + RT oddelenie"
         
-        room_str = ", ".join([str(r[0]) for r in rooms])
-        suffix = ""
-        if doc == wolf_doc_name: suffix = " + Wolf"
-        elif doc == head_doc and "RT" not in suffix: suffix = " + RT oddelenie"
-        elif doc == rt_help_doc: suffix = " + RT oddelenie"
-             
         if not rooms:
              if doc == wolf_doc_name: result_text[doc] = "Wolf (0L)"
-             elif doc == head_doc and num_workers >= 3: result_text[doc] = "RT oddelenie"
+             elif doc == head_doc: result_text[doc] = "RT oddelenie"
              elif doc == rt_help_doc: result_text[doc] = "RT oddelenie (0L)"
-             else: result_text[doc] = "" # Empty for others
+             else: result_text[doc] = ""
         else:
-             result_text[doc] = f"{room_str}{suffix}"
+             result_text[doc] = f"{r_str}{suf}"
              
     return result_text, result_raw
 
@@ -349,7 +338,6 @@ def get_ical_events(start_date, end_date):
             elif '-' in raw and typ == "Dovolenka":
                 parts = raw.split('-')
                 name = parts[0].strip()
-            
             curr, limit = max(ev_start, start_date.date()), min(ev_end, end_date.date())
             while curr < limit:
                 absences.setdefault(curr.strftime('%Y-%m-%d'), {})[name] = typ
@@ -361,7 +349,6 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
     days_map = {0: "Pondelok", 1: "Utorok", 2: "Streda", 3: "Stvrtok", 4: "Piatok"}
     weekday = start_date.weekday()
     thursday = start_date + timedelta(days=(3 - weekday) % 7)
-    
     dates, data_grid = [], {}
     all_doctors, doctors_info = [], {}
     week_dates_str = [(thursday + timedelta(days=i)).strftime('%Y-%m-%d') for i in range(7) if (thursday + timedelta(days=i)).weekday() < 5]
@@ -383,7 +370,6 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
         curr_date = thursday + timedelta(days=i)
         day_name = days_map.get(curr_date.weekday())
         if not day_name: continue
-        
         date_str = curr_date.strftime('%d.%m.%Y')
         date_key = curr_date.strftime('%Y-%m-%d')
         dates.append(date_str)
@@ -394,7 +380,6 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
         available = [d for d in all_doctors if (config['lekari'][d].get('active', True) or date_key in config['lekari'][d].get('extra_dni', [])) and d not in day_absences and day_name not in config['lekari'][d].get('nepracuje', [])]
         assigned_amb = {}
         
-        # 1. Pevné dni
         for doc in list(available):
             if fixed := config['lekari'][doc].get('pevne_dni', {}).get(day_name):
                 for t in [t.strip() for t in fixed.split(',')]:
@@ -402,7 +387,6 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
                     else: assigned_amb[t] = doc
                 available.remove(doc)
         
-        # 2. Ambulancie priority
         ambs_to_process = ["Radio 2A", "Radio 2B", "Chemo 8B", "Chemo 8A", "Chemo 8C", "Wolf", "Konziliarna", "Velka dispenzarna", "Mala dispenzarna"]
         amb_scarcity = []
         for amb_name in ambs_to_process:
@@ -415,14 +399,12 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
             if amb_name == "Radio 2B" and "Martinka" not in available:
                 assigned_amb[amb_name] = "ZATVORENÉ"
                 continue
-
             prio = config['ambulancie'][amb_name]['priority']
             if isinstance(prio, dict): prio = prio.get(str(curr_date.weekday()), prio.get('default', []))
             cands = [d for d in prio if d in available and amb_name in config['lekari'][d].get('moze', [])]
             amb_scarcity.append({"name": amb_name, "candidates": cands, "count": len(cands), "idx": ambs_to_process.index(amb_name)})
         
         amb_scarcity.sort(key=lambda x: (x['count'], x['idx']))
-        
         for item in amb_scarcity:
             amb = item['name']
             cands = [c for c in item['candidates'] if c in available]
@@ -438,7 +420,6 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
 
         for k, v in assigned_amb.items(): data_grid[date_str][k] = v
         
-        # 3. Oddelenie
         wolf_doc = assigned_amb.get("Wolf")
         if "ODDELENIE (Celé)" in closed_today:
             room_text_map, room_raw_map = {}, {}
@@ -449,7 +430,6 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
                 ward_cands.append(wolf_doc)
             
             manual = manual_all.get(date_key, {})
-            # VOLANIE NOVEJ LOGIKY
             room_text_map, room_raw_map = distribute_rooms(ward_cands, wolf_doc, last_day_assignments, manual)
             last_day_assignments = room_raw_map
             if save_hist: history[date_key] = room_raw_map
@@ -465,7 +445,6 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
                 data_grid[date_str][doc] = " + ".join(my) if my else ""
                 
         if save_hist: save_history(history)
-    
     return dates, data_grid, all_doctors, doctors_info
 
 def create_display_df(dates, data_grid, all_doctors, doctors_info, motto, config):
@@ -482,17 +461,14 @@ def create_display_df(dates, data_grid, all_doctors, doctors_info, motto, config
             vals.append(val)
         label = f"Dr {doc}" + (f" {doctors_info[doc]}" if doc in doctors_info else "")
         rows.append([label] + vals)
-    
     rows.append([motto or "Motto"] + [""] * len(dates))
     sections = [("Konziliárna amb", ["Konziliarna"]), ("RT ambulancie", ["Radio 2A", "Radio 2B"]), ("Chemo amb", ["Chemo 8A", "Chemo 8B", "Chemo 8C"]), ("Disp. Ambulancia", ["Velka dispenzarna", "Mala dispenzarna"]), ("RTG Terapia", ["Wolf"])]
-    
     for title, ambs in sections:
         rows.append([title] + dates)
         for amb in ambs:
             vals = [data_grid[d].get(amb, "").replace("---", "").replace("NEOBSADENÉ", "???") for d in dates]
             rows.append([display_map.get(amb, amb)] + vals)
         rows.append([""] * (len(dates) + 1))
-    
     return pd.DataFrame(rows)
 
 def create_excel_report(df):
@@ -526,7 +502,6 @@ def create_pdf_report(df, motto):
     doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), rightMargin=10, leftMargin=10, topMargin=10, bottomMargin=10)
     styles = getSampleStyleSheet()
     cell_style = ParagraphStyle('C', parent=styles['Normal'], fontName=font_name, fontSize=7, leading=8, alignment=1)
-    
     data = [[Paragraph(str(c), ParagraphStyle('H', parent=styles['Normal'], fontName=font_name, fontSize=8, alignment=1)) for c in df.columns]]
     for _, row in df.iterrows():
         row_data = []
@@ -539,7 +514,6 @@ def create_pdf_report(df, motto):
             else: p = Paragraph(txt, cell_style)
             row_data.append(p)
         data.append(row_data)
-        
     t = Table(data, colWidths=[130] + [135]*(len(df.columns)-1))
     style = TableStyle([('GRID', (0,0), (-1,-1), 0.5, colors.black), ('VALIGN', (0,0), (-1,-1), 'MIDDLE'), ('BACKGROUND', (0,0), (-1,0), colors.grey)])
     for i, row in enumerate(df.iterrows()):
