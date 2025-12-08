@@ -144,10 +144,8 @@ def load_config():
         }
         changed = True
     
-    # Migrácia Prijmova -> Konziliarna ak existuje starý config
     if "Prijmova" in config.get("ambulancie", {}):
         config["ambulancie"]["Konziliarna"] = config["ambulancie"].pop("Prijmova")
-        # Update lekárov
         for doc, props in config.get("lekari", {}).items():
             if "moze" in props:
                 props["moze"] = ["Konziliarna" if x == "Prijmova" else x for x in props["moze"]]
@@ -157,11 +155,9 @@ def load_config():
                         props["pevne_dni"][day] = "Konziliarna"
         changed = True
 
-    # Migrácia Chemo 8B na list, ak je dict
     if "Chemo 8B" in config.get("ambulancie", {}):
         prio = config["ambulancie"]["Chemo 8B"].get("priority")
         if isinstance(prio, dict):
-             # Použijeme default list ako základ pre konverziu na editovateľný zoznam
              config["ambulancie"]["Chemo 8B"]["priority"] = prio.get("default", ["Riedlova", "Kohutek", "Stratena", "Bystricky", "Vidulin", "Blahova"])
              changed = True
 
@@ -198,7 +194,7 @@ def get_default_config():
             "default_body": "Dobrý deň,\nv prílohe rozpis.\nS pozdravom"
         },
         "ambulancie": {
-            "Konziliarna": { # Premenované z Prijmova
+            "Konziliarna": { 
                 "dni": ["Pondelok", "Utorok", "Streda", "Stvrtok", "Piatok"],
                 "priority": ["Kohutekova", "Kohutek", "Bystricky", "Zavrelova"]
             },
@@ -226,7 +222,6 @@ def get_default_config():
             },
             "Chemo 8B": {
                 "dni": ["Pondelok", "Utorok", "Streda", "Stvrtok", "Piatok"],
-                # Zmenené na jednoduchý zoznam pre editovateľnosť
                 "priority": ["Riedlova", "Kohutek", "Stratena", "Bystricky", "Vidulin", "Blahova"]
             },
             "Chemo 8C": {
@@ -572,7 +567,6 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
                         assigned_amb[t] = doc
                 available.remove(doc)
         
-        # Nahradené "Prijmova" za "Konziliarna"
         ambs_to_process = ["Radio 2A", "Radio 2B", "Chemo 8B", "Chemo 8A", "Chemo 8C", "Wolf", "Konziliarna", "Velka dispenzarna", "Mala dispenzarna"]
         amb_scarcity = []
 
@@ -674,7 +668,7 @@ def create_display_df(dates, data_grid, all_doctors, doctors_info, motto, config
     
     display_map = {
         "Radio 2A": "Radio 2A",
-        "Konziliarna": "Konziliárna amb.", # Display map pre novú Prijmovu
+        "Konziliarna": "Konziliárna amb.", 
         "Velka dispenzarna": "veľký dispenzár",
         "Mala dispenzarna": "malý dispenzár"
     }
@@ -697,7 +691,7 @@ def create_display_df(dates, data_grid, all_doctors, doctors_info, motto, config
     rows.append([motto or "Motto"] + [""] * len(dates))
     
     sections = [
-        ("Konziliárna amb", ["Konziliarna"]), # Upravené ID
+        ("Konziliárna amb", ["Konziliarna"]), 
         ("RT ambulancie", ["Radio 2A", "Radio 2B"]),
         ("Chemo amb", ["Chemo 8A", "Chemo 8B", "Chemo 8C"]),
         ("Disp. Ambulancia", ["Velka dispenzarna", "Mala dispenzarna"]),
@@ -911,6 +905,10 @@ if 'config' not in st.session_state:
 if 'manual_core' not in st.session_state:
     st.session_state.manual_core = {}
 
+# Inicializácia session state pre dynamické formuláre
+if 'temp_exceptions' not in st.session_state:
+    st.session_state.temp_exceptions = []
+
 mode = st.sidebar.radio("Navigácia", ["🚀 Generovať rozpis", "⚙️ Nastavenia lekárov", "🏥 Nastavenia ambulancií", "📧 Nastavenia Emailu"])
 
 if mode == "🚀 Generovať rozpis":
@@ -918,38 +916,69 @@ if mode == "🚀 Generovať rozpis":
     st.session_state.motto = c1.text_input("📢 Motto týždňa:", placeholder="Sem napíšte motto...")
     start_d = c2.date_input("Začiatok rozpisu:", datetime.now())
 
-    with st.expander("📅 Výnimky a zatváranie"):
-        c_ex1, c_ex2, c_ex3 = st.columns([1, 2, 1])
-        d_range = c_ex1.date_input("Rozsah dátumov:", value=[])
-        amb_options = ["ODDELENIE (Celé)"] + list(st.session_state.config['ambulancie'].keys())
-        selected_closures = c_ex2.multiselect("Čo má byť ZATVORENÉ?", options=amb_options)
+    with st.expander("📅 Výnimky a zatváranie", expanded=True):
+        st.info("Tu môžete nastaviť dni, kedy sú ambulancie alebo celé oddelenie zatvorené.")
         
-        if c_ex3.button("💾 Uložiť"):
+        # 1. Zobrazenie existujúcich "temp" výnimiek pre tento session
+        indices_to_remove = []
+        for i, (d_range, closed_items) in enumerate(st.session_state.temp_exceptions):
+            c_show1, c_show2, c_show3 = st.columns([2, 3, 1])
+            
+            d_start_s = d_range[0].strftime('%d.%m.')
+            d_end_s = d_range[1].strftime('%d.%m.%Y') if len(d_range) > 1 else ""
+            label_date = f"{d_start_s} - {d_end_s}" if d_end_s else d_start_s
+            
+            c_show1.text(f"🗓️ {label_date}")
+            c_show2.text(f"🔒 {', '.join(closed_items)}")
+            if c_show3.button("🗑️", key=f"del_exc_{i}"):
+                indices_to_remove.append(i)
+        
+        for idx in sorted(indices_to_remove, reverse=True):
+            st.session_state.temp_exceptions.pop(idx)
+        
+        # 2. Formulár na pridanie novej výnimky
+        st.markdown("---")
+        c_ex1, c_ex2 = st.columns([1, 2])
+        new_range = c_ex1.date_input("Nový rozsah dátumov:", value=[], key="new_ex_range")
+        amb_options = ["ODDELENIE (Celé)"] + list(st.session_state.config['ambulancie'].keys())
+        new_closed = c_ex2.multiselect("Čo zatvoriť v tomto termíne?", options=amb_options, key="new_ex_closed")
+        
+        if st.button("➕ Pridať ďalšiu výnimku"):
+            if new_range and new_closed:
+                # Ak je vybraný len jeden deň, spravíme z neho list [d, d] pre konzistenciu alebo len tuple
+                r = (new_range[0], new_range[1]) if len(new_range) > 1 else (new_range[0], new_range[0])
+                st.session_state.temp_exceptions.append((r, new_closed))
+                st.rerun() # Refresh aby sa zobrazila v zozname hore
+            elif not new_range:
+                st.warning("Vyberte dátum.")
+            elif not new_closed:
+                st.warning("Vyberte čo má byť zatvorené.")
+
+        # 3. Tlačidlo na trvalé uloženie do configu
+        st.markdown("---")
+        if st.button("💾 Uložiť všetky výnimky do konfigurácie", type="primary"):
             if 'closures' not in st.session_state.config:
                 st.session_state.config['closures'] = {}
-            if len(d_range) == 2:
+            
+            # Najprv vyčistíme staré closures ak treba, alebo len pridáme? 
+            # Tu záleží na logike. Pre bezpečnosť môžeme iba pridávať/prepísať dotknuté dni.
+            
+            count = 0
+            for d_range, closed_items in st.session_state.temp_exceptions:
                 curr = d_range[0]
-                cnt = 0
-                while curr <= d_range[1]:
+                end = d_range[1]
+                while curr <= end:
                     d_key = curr.strftime('%Y-%m-%d')
-                    if selected_closures:
-                        st.session_state.config['closures'][d_key] = selected_closures
-                    else:
-                        if d_key in st.session_state.config['closures']:
-                            del st.session_state.config['closures'][d_key]
+                    # Ak už existuje záznam pre tento deň, zlúčime ho alebo prepíšeme?
+                    # Prepíšeme pre jednoduchosť, alebo spravíme union.
+                    # Tu prepíšeme podľa požiadavky "nastaviť výnimky".
+                    st.session_state.config['closures'][d_key] = closed_items
                     curr += timedelta(days=1)
-                    cnt += 1
-                save_config(st.session_state.config)
-                st.success(f"Nastavené na {cnt} dní.")
-            elif len(d_range) == 1:
-                d_key = d_range[0].strftime('%Y-%m-%d')
-                if selected_closures:
-                    st.session_state.config['closures'][d_key] = selected_closures
-                else:
-                    if d_key in st.session_state.config['closures']:
-                        del st.session_state.config['closures'][d_key]
-                save_config(st.session_state.config)
-                st.success("Nastavené.")
+                    count += 1
+            
+            save_config(st.session_state.config)
+            st.success(f"✅ Uložené! Nastavené výnimky pre {count} dní.")
+            st.session_state.temp_exceptions = [] # Vyčistiť temp po uložení
 
     st.markdown("### Manuálne pridelenie izieb")
     manual_core_input = {}
