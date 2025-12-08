@@ -20,6 +20,8 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 
 # --- KONFIGURÁCIA ---
 CONFIG_FILE = 'hospital_config.json'
@@ -492,7 +494,6 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
                 doctors_info[d_name] = f"⚠️ len {', '.join(readable_days)}"
 
     all_doctors = sorted(all_doctors)
-    
     history = load_history()
     day_before_str = (thursday - timedelta(days=1)).strftime('%Y-%m-%d')
     last_day_assignments = history.get(day_before_str, {})
@@ -522,7 +523,6 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
             if not is_normally_active and not has_extra_today: continue
             if d in day_absences: continue
             if day_name in props.get('nepracuje', []): continue
-                
             available.append(d)
 
         assigned_amb = {}
@@ -541,7 +541,6 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
         
         # 4. Smart Assignment (Scarcity-based)
         # Namiesto fixného poradia zistíme, kde je "úzke hrdlo" (najmenej kandidátov)
-        
         ambs_to_process = ["Radio 2A", "Radio 2B", "Chemo 8B", "Chemo 8A", "Chemo 8C", "Wolf", "Prijmova", "Velka dispenzarna", "Mala dispenzarna"]
         amb_scarcity = []
 
@@ -569,9 +568,8 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
             candidates = [doc for doc in prio_list if doc in available and amb_name in config['lekari'][doc].get('moze', [])]
             
             # Wolf check: Ak je Spanik v Malej Dispenzarni, Wolf je 'vyriešený' ním.
-            # Ale to vieme až po priradení. Takže Wolf berieme ako bežnú ambulanciu, 
+            # Ale to vieme až po priradení. Takže Wolf berieme ako bežnú ambulanciu,
             # ale s nižšou prioritou ak má veľa kandidátov.
-            
             amb_scarcity.append({
                 "name": amb_name,
                 "candidates": candidates,
@@ -659,8 +657,8 @@ def scan_future_problems(config, weeks_ahead=12):
     end = start + timedelta(weeks=weeks_ahead)
     absences = get_ical_events(start, end)
     closures = config.get('closures', {})
-    current = start
     
+    current = start
     while current <= end:
         dates, grid, docs, info = generate_data_structure(config, absences, current, save_hist=False)
         for date_str in dates:
@@ -765,37 +763,114 @@ def create_excel_report(df):
             
     return output.getvalue()
 
+# --- VYLEPŠENÉ PDF FUNKCIE ---
+def register_fonts():
+    """Stiahne a zaregistruje DejaVu fonty pre diakritiku."""
+    font_dir = "fonts"
+    if not os.path.exists(font_dir):
+        os.makedirs(font_dir)
+        
+    fonts = {
+        "DejaVuSans": "https://raw.githubusercontent.com/dejavu-fonts/dejavu-fonts/master/ttf/DejaVuSans.ttf",
+        "DejaVuSans-Bold": "https://raw.githubusercontent.com/dejavu-fonts/dejavu-fonts/master/ttf/DejaVuSans-Bold.ttf",
+        "DejaVuSans-Oblique": "https://raw.githubusercontent.com/dejavu-fonts/dejavu-fonts/master/ttf/DejaVuSans-Oblique.ttf"
+    }
+    
+    font_registered = False
+    for font_name, url in fonts.items():
+        font_path = os.path.join(font_dir, f"{font_name}.ttf")
+        if not os.path.exists(font_path):
+            try:
+                response = requests.get(url, timeout=10)
+                if response.status_code == 200:
+                    with open(font_path, "wb") as f:
+                        f.write(response.content)
+            except:
+                pass
+                
+        if os.path.exists(font_path):
+            try:
+                pdfmetrics.registerFont(TTFont(font_name, font_path))
+                font_registered = True
+            except:
+                pass
+    return font_registered
+
 def create_pdf_report(df, motto):
+    """Vytvorí PDF s podporou SK diakritiky a bez emoji."""
     buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
+    
+    has_custom_font = register_fonts()
+    font_normal = 'DejaVuSans' if has_custom_font else 'Helvetica'
+    font_bold = 'DejaVuSans-Bold' if has_custom_font else 'Helvetica-Bold'
+    font_italic = 'DejaVuSans-Oblique' if has_custom_font else 'Helvetica-Oblique'
+
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=landscape(A4),
+        rightMargin=30,
+        leftMargin=30,
+        topMargin=30,
+        bottomMargin=30
+    )
     elements = []
     styles = getSampleStyleSheet()
+    
     title = f"Rozpis prác Onkologická klinika {df.columns[1]} - {df.columns[-1]}"
-    elements.append(Paragraph(title, styles['Title']))
+    title_style = styles['Title']
+    title_style.fontName = font_bold
+    title_style.fontSize = 14
+    elements.append(Paragraph(title, title_style))
     elements.append(Spacer(1, 12))
-    data = [df.columns.tolist()] + df.values.tolist()
-    col_widths = [100] + [90] * (len(df.columns) - 1)
+    
+    def clean_text(value):
+        if value is None: return ""
+        s = str(value)
+        cleaned = []
+        for ch in s:
+            code = ord(ch)
+            if 0x1F000 <= code <= 0x1FAFF: continue 
+            if code > 0x10FFFF: continue
+            cleaned.append(ch)
+        return "".join(cleaned)
+
+    header = [clean_text(col) for col in df.columns.tolist()]
+    data = [header]
+    for row in df.values.tolist():
+        data.append([clean_text(cell) for cell in row])
+    
+    first_col_width = 110
+    other_col_width = 90
+    col_widths = [first_col_width] + [other_col_width] * (len(df.columns) - 1)
+    
     t = Table(data, colWidths=col_widths)
+    
     style = TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
         ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('FONTNAME', (0, 0), (-1, 0), font_bold),
         ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
         ('BACKGROUND', (0, 1), (-1, -1), colors.white),
-        ('GRID', (0, 0), (-1, -1), 1, colors.black),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
         ('FONTSIZE', (0, 0), (-1, -1), 8),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE')
+        ('FONTNAME', (0, 1), (-1, -1), font_normal),
     ])
     
+    section_rows = ["Oddelenie", "Konziliárna amb", "RT ambulancie", "Chemo amb", "Disp. Ambulancia", "RTG Terapia"]
+    motto_text = motto or "Motto"
+    
     for i, row in enumerate(data):
-        if row[0] in ["Oddelenie", "Konziliárna amb", "RT ambulancie", "Chemo amb", "Disp. Ambulancia", "RTG Terapia"]:
+        cell0 = row[0]
+        if cell0 in section_rows:
              style.add('BACKGROUND', (0, i), (-1, i), colors.lightgrey)
-             style.add('FONTNAME', (0, i), (-1, i), 'Helvetica-Bold')
-        if row[0] == (motto or "Motto"):
+             style.add('FONTNAME', (0, i), (-1, i), font_bold)
+        if cell0 == motto_text:
              style.add('SPAN', (0, i), (-1, i))
              style.add('BACKGROUND', (0, i), (-1, i), colors.whitesmoke)
-             style.add('FONTNAME', (0, i), (-1, i), 'Helvetica-Oblique')
+             style.add('FONTNAME', (0, i), (-1, i), font_italic)
+             style.add('ALIGN', (0, i), (-1, i), 'LEFT')
              
     t.setStyle(style)
     elements.append(t)
@@ -810,235 +885,244 @@ def send_email_with_pdf(pdf_bytes, filename, to_email, subject, body):
         
     from_email = st.secrets["email"]["username"]
     password = st.secrets["email"]["password"]
+    
     msg = MIMEMultipart()
     msg['From'] = from_email
     msg['To'] = to_email
     msg['Subject'] = subject
     msg.attach(MIMEText(body, 'plain'))
-    attachment = MIMEBase('application', 'pdf')
-    attachment.set_payload(pdf_bytes)
-    encoders.encode_base64(attachment)
-    attachment.add_header('Content-Disposition', f'attachment; filename={filename}')
-    msg.attach(attachment)
+    
+    part = MIMEBase('application', 'pdf')
+    part.set_payload(pdf_bytes)
+    encoders.encode_base64(part)
+    part.add_header('Content-Disposition', f'attachment; filename={filename}')
+    msg.attach(part)
     
     try:
         server = smtplib.SMTP('smtp.gmail.com', 587)
         server.starttls()
         server.login(from_email, password)
-        server.sendmail(from_email, to_email, msg.as_string())
+        server.send_message(msg)
         server.quit()
         return True
     except Exception as e:
         st.error(f"Chyba: {e}")
         return False
 
-# --- UI START ---
-st.set_page_config(page_title="Rozpis FN Trenčín", layout="wide")
-st.title("🏥 Rozpis prác - Onkologická klinika FN Trenčín")
-
-if 'config' not in st.session_state:
-    st.session_state.config = load_config()
-if 'manual_core' not in st.session_state:
-    st.session_state.manual_core = {}
-
-mode = st.sidebar.radio("Navigácia", ["🚀 Generovať rozpis", "⚙️ Nastavenia lekárov", "🏥 Nastavenia ambulancií", "📧 Nastavenia Emailu"])
-
-if mode == "🚀 Generovať rozpis":
-    c1, c2 = st.columns([2, 2])
-    st.session_state.motto = c1.text_input("📢 Motto týždňa:", placeholder="Sem napíšte motto...")
-    start_d = c2.date_input("Začiatok rozpisu:", datetime.now())
+# --- UI LOGIKA ---
+def main():
+    st.set_page_config(page_title="Rozpis FN Trenčín", layout="wide")
+    st.title("🏥 Rozpis prác - Onkologická klinika FN Trenčín")
     
-    with st.expander("📅 Výnimky a zatváranie"):
-        c_ex1, c_ex2, c_ex3 = st.columns([1, 2, 1])
-        d_range = c_ex1.date_input("Rozsah dátumov:", value=[])
-        amb_options = ["ODDELENIE (Celé)"] + list(st.session_state.config['ambulancie'].keys())
-        selected_closures = c_ex2.multiselect("Čo má byť ZATVORENÉ?", options=amb_options)
+    if 'config' not in st.session_state:
+        st.session_state.config = load_config()
+    
+    if 'manual_core' not in st.session_state:
+        st.session_state.manual_core = {}
         
-        if c_ex3.button("💾 Uložiť"):
-            if 'closures' not in st.session_state.config:
-                st.session_state.config['closures'] = {}
+    # Navigácia - BEZ AUDITU
+    mode = st.sidebar.radio("Navigácia", ["🚀 Generovať rozpis", "⚙️ Nastavenia lekárov", "🏥 Nastavenia ambulancií", "📧 Nastavenia Emailu"])
+    
+    if mode == "🚀 Generovať rozpis":
+        c1, c2 = st.columns([2, 2])
+        st.session_state.motto = c1.text_input("📢 Motto týždňa:", placeholder="Sem napíšte motto...")
+        start_d = c2.date_input("Začiatok rozpisu:", datetime.now())
+
+        with st.expander("📅 Výnimky a zatváranie"):
+            c_ex1, c_ex2, c_ex3 = st.columns([1, 2, 1])
+            d_range = c_ex1.date_input("Rozsah dátumov:", value=[])
+            amb_options = ["ODDELENIE (Celé)"] + list(st.session_state.config['ambulancie'].keys())
+            selected_closures = c_ex2.multiselect("Čo má byť ZATVORENÉ?", options=amb_options)
             
-            if len(d_range) == 2:
-                curr = d_range[0]
-                cnt = 0
-                while curr <= d_range[1]:
-                    d_key = curr.strftime('%Y-%m-%d')
+            if c_ex3.button("💾 Uložiť"):
+                if 'closures' not in st.session_state.config:
+                    st.session_state.config['closures'] = {}
+                
+                if len(d_range) == 2:
+                    curr = d_range[0]
+                    cnt = 0
+                    while curr <= d_range[1]:
+                        d_key = curr.strftime('%Y-%m-%d')
+                        if selected_closures:
+                            st.session_state.config['closures'][d_key] = selected_closures
+                        else:
+                            if d_key in st.session_state.config['closures']:
+                                del st.session_state.config['closures'][d_key]
+                        curr += timedelta(days=1)
+                        cnt += 1
+                    save_config(st.session_state.config)
+                    st.success(f"Nastavené na {cnt} dní.")
+                elif len(d_range) == 1:
+                    d_key = d_range[0].strftime('%Y-%m-%d')
                     if selected_closures:
                         st.session_state.config['closures'][d_key] = selected_closures
                     else:
                         if d_key in st.session_state.config['closures']:
                             del st.session_state.config['closures'][d_key]
-                    curr += timedelta(days=1)
-                    cnt += 1
-                save_config(st.session_state.config)
-                st.success(f"Nastavené na {cnt} dní.")
-            elif len(d_range) == 1:
-                d_key = d_range[0].strftime('%Y-%m-%d')
-                if selected_closures:
-                    st.session_state.config['closures'][d_key] = selected_closures
+                    save_config(st.session_state.config)
+                    st.success("Nastavené.")
+
+        st.markdown("### Manuálne pridelenie izieb")
+        manual_core_input = {}
+        ward_docs = [d for d, p in st.session_state.config["lekari"].items() if "Oddelenie" in p.get("moze", []) and p.get("active")]
+        
+        cols = st.columns(2)
+        for i, doc in enumerate(ward_docs):
+            txt = cols[i % 2].text_input(f"Dr {doc} – izby (čiarkou):", key=f"core_{doc}")
+            if txt.strip():
+                manual_core_input[doc] = [int(p.strip()) for p in txt.split(',') if p.strip().isdigit()]
+        
+        if manual_core_input:
+            st.session_state.manual_core[start_d.strftime('%Y-%m-%d')] = manual_core_input
+            
+        c_btn1, c_btn2, c_btn3 = st.columns(3)
+        gen_clicked = c_btn1.button("🚀 Generovať rozpis", type="primary")
+        scan_clicked = c_btn2.button("🔭 Vyhliadka ďalších týždňov")
+        clear_hist = c_btn3.button("🗑️ Vymazať históriu")
+        
+        weeks_num = st.number_input("Počet týždňov pre vyhliadku:", min_value=1, max_value=52, value=12)
+        
+        if gen_clicked:
+            with st.spinner("Počítam..."):
+                end_d = start_d + timedelta(days=14)
+                absences = get_ical_events(datetime.combine(start_d, datetime.min.time()), datetime.combine(end_d, datetime.min.time()))
+                dates, grid, docs, d_info = generate_data_structure(st.session_state.config, absences, start_d)
+                
+                df_display = create_display_df(dates, grid, docs, d_info, st.session_state.motto, st.session_state.config)
+                df_display.columns = ["Sekcia / Dátum"] + dates
+                st.session_state.df_display = df_display
+                st.success("✅ Hotovo!")
+                
+        if scan_clicked:
+            with st.spinner(f"Pozerám {weeks_num} týždňov dopredu..."):
+                problems_df = scan_future_problems(st.session_state.config, weeks_ahead=weeks_num)
+                if problems_df is not None and not problems_df.empty:
+                    st.subheader("🔭 Vyhliadka ďalších týždňov – problémové dni")
+                    st.dataframe(problems_df, use_container_width=True, hide_index=True)
                 else:
-                    if d_key in st.session_state.config['closures']:
-                        del st.session_state.config['closures'][d_key]
-                save_config(st.session_state.config)
-                st.success("Nastavené.")
-    
-    st.markdown("### Manuálne pridelenie izieb")
-    manual_core_input = {}
-    ward_docs = [d for d, p in st.session_state.config["lekari"].items() if "Oddelenie" in p.get("moze", []) and p.get("active")]
-    cols = st.columns(2)
-    for i, doc in enumerate(ward_docs):
-        txt = cols[i % 2].text_input(f"Dr {doc} – izby (čiarkou):", key=f"core_{doc}")
-        if txt.strip():
-            manual_core_input[doc] = [int(p.strip()) for p in txt.split(',') if p.strip().isdigit()]
-    if manual_core_input:
-        st.session_state.manual_core[start_d.strftime('%Y-%m-%d')] = manual_core_input
-    
-    # --- HLAVNÉ TLAČIDLÁ ---
-    c_btn1, c_btn2, c_btn3 = st.columns(3)
-    gen_clicked = c_btn1.button("🚀 Generovať rozpis", type="primary")
-    scan_clicked = c_btn2.button("🔭 Vyhliadka ďalších týždňov")
-    clear_hist = c_btn3.button("🗑️ Vymazať históriu")
-    
-    weeks_num = st.number_input("Počet týždňov pre vyhliadku:", min_value=1, max_value=52, value=12)
-
-    if gen_clicked:
-        with st.spinner("Počítam..."):
-            end_d = start_d + timedelta(days=14)
-            absences = get_ical_events(datetime.combine(start_d, datetime.min.time()), datetime.combine(end_d, datetime.min.time()))
-            dates, grid, docs, d_info = generate_data_structure(st.session_state.config, absences, start_d)
-            df_display = create_display_df(dates, grid, docs, d_info, st.session_state.motto, st.session_state.config)
-            df_display.columns = ["Sekcia / Dátum"] + dates
-            st.session_state.df_display = df_display
-            st.success("✅ Hotovo!")
-            
-    if scan_clicked:
-        with st.spinner(f"Pozerám {weeks_num} týždňov dopredu..."):
-            problems_df = scan_future_problems(st.session_state.config, weeks_ahead=weeks_num)
-            if problems_df is not None and not problems_df.empty:
-                st.subheader("🔭 Vyhliadka ďalších týždňov – problémové dni")
-                st.dataframe(problems_df, use_container_width=True, hide_index=True)
-            else:
-                st.success("✅ V zadanom období nie sú žiadne neobsadené pracoviská.")
-    
-    if clear_hist: 
-        save_history({})
-        st.success("História vymazaná.")
-    
-    if 'df_display' in st.session_state:
-        st.markdown("---")
-        df_for_excel = st.session_state.df_display.copy()
-        df_for_excel.iloc[0, 1:] = df_for_excel.columns[1:]
-        xlsx_data = create_excel_report(df_for_excel)
-        pdf_data = create_pdf_report(df_for_excel, st.session_state.motto)
-        
-        start_date_str = df_for_excel.columns[1].replace('.', '_')
-        end_date_str = df_for_excel.columns[-1].replace('.', '_')
-        filename_base = f"Rozpis_{start_date_str}_az_{end_date_str}"
-        
-        c_dl1, c_dl2 = st.columns(2)
-        c_dl1.download_button("⬇️ EXCEL", xlsx_data, f"{filename_base}.xlsx")
-        c_dl2.download_button("⬇️ PDF", pdf_data, f"{filename_base}.pdf", mime="application/pdf")
-        
-        with st.expander("📧 Odoslať emailom"):
-            email_conf = st.session_state.config.get('email_settings', {})
-            to_email = st.text_input("Príjemca:", value=email_conf.get("default_to", ""))
-            subject = st.text_input("Predmet:", value=email_conf.get("default_subject", ""))
-            body = st.text_area("Text:", value=email_conf.get("default_body", ""), height=150)
-            
-            if st.button("📤 Odoslať PDF"):
-                if send_email_with_pdf(pdf_data, f"{filename_base}.pdf", to_email, subject, body):
-                    st.success("Email odoslaný!")
+                    st.success("✅ V zadanom období nie sú žiadne neobsadené pracoviská.")
                     
-        st.subheader("📄 Náhľad")
-        st.dataframe(st.session_state.df_display, use_container_width=True, hide_index=True)
+        if clear_hist:
+            save_history({})
+            st.success("História vymazaná.")
+            
+        if 'df_display' in st.session_state:
+            st.markdown("---")
+            df_for_excel = st.session_state.df_display.copy()
+            df_for_excel.iloc[0, 1:] = df_for_excel.columns[1:]
+            
+            xlsx_data = create_excel_report(df_for_excel)
+            pdf_data = create_pdf_report(df_for_excel, st.session_state.motto)
+            
+            start_date_str = df_for_excel.columns[1].replace('.', '_')
+            end_date_str = df_for_excel.columns[-1].replace('.', '_')
+            filename_base = f"Rozpis_{start_date_str}_az_{end_date_str}"
+            
+            c_dl1, c_dl2 = st.columns(2)
+            c_dl1.download_button("⬇️ EXCEL", xlsx_data, f"{filename_base}.xlsx")
+            c_dl2.download_button("⬇️ PDF", pdf_data, f"{filename_base}.pdf", mime="application/pdf")
+            
+            with st.expander("📧 Odoslať emailom"):
+                email_conf = st.session_state.config.get('email_settings', {})
+                to_email = st.text_input("Príjemca:", value=email_conf.get("default_to", ""))
+                subject = st.text_input("Predmet:", value=email_conf.get("default_subject", ""))
+                body = st.text_area("Text:", value=email_conf.get("default_body", ""), height=150)
+                
+                if st.button("📤 Odoslať PDF"):
+                    if send_email_with_pdf(pdf_data, f"{filename_base}.pdf", to_email, subject, body):
+                        st.success("Email odoslaný!")
 
-elif mode == "📧 Nastavenia Emailu":
-    st.header("Nastavenia Emailu")
-    current_conf = st.session_state.config.get('email_settings', {})
-    new_to = st.text_input("Predvolený príjemca:", value=current_conf.get("default_to", ""))
-    new_subj = st.text_input("Predvolený predmet:", value=current_conf.get("default_subject", ""))
-    new_body = st.text_area("Predvolený text:", value=current_conf.get("default_body", ""))
-    
-    if st.button("💾 Uložiť"):
-        st.session_state.config['email_settings'] = {
-            "default_to": new_to,
-            "default_subject": new_subj,
-            "default_body": new_body
-        }
-        save_config(st.session_state.config)
-        st.success("Uložené.")
+            st.subheader("📄 Náhľad")
+            st.dataframe(st.session_state.df_display, use_container_width=True, hide_index=True)
 
-elif mode == "⚙️ Nastavenia lekárov":
-    st.header("Správa lekárov")
-    col_new, col_btn = st.columns([3, 1])
-    new_doc = col_new.text_input("Pridať lekára:")
-    
-    if col_btn.button("➕ Pridať") and new_doc:
-        if new_doc not in st.session_state.config['lekari']:
-            st.session_state.config['lekari'][new_doc] = {"moze": ["Oddelenie"], "active": True}
+    elif mode == "📧 Nastavenia Emailu":
+        st.header("Nastavenia Emailu")
+        current_conf = st.session_state.config.get('email_settings', {})
+        new_to = st.text_input("Predvolený príjemca:", value=current_conf.get("default_to", ""))
+        new_subj = st.text_input("Predvolený predmet:", value=current_conf.get("default_subject", ""))
+        new_body = st.text_area("Predvolený text:", value=current_conf.get("default_body", ""))
+        
+        if st.button("💾 Uložiť"):
+            st.session_state.config['email_settings'] = {
+                "default_to": new_to,
+                "default_subject": new_subj,
+                "default_body": new_body
+            }
             save_config(st.session_state.config)
-            st.success(f"{new_doc} pridaný")
-            st.rerun()
-            
-    for doc, data in st.session_state.config['lekari'].items():
-        with st.expander(f"{doc} {'(Neaktívny)' if not data.get('active', True) else ''}"):
-            c_main1, c_main2 = st.columns(2)
-            act = c_main1.checkbox("Aktívny", value=data.get('active', True), key=f"act_{doc}")
-            
-            if not act:
-                st.markdown("##### 📅 Extra dni (pre neaktívnych)")
-                current_extras = data.get('extra_dni', [])
+            st.success("Uložené.")
+
+    elif mode == "⚙️ Nastavenia lekárov":
+        st.header("Správa lekárov")
+        col_new, col_btn = st.columns([3, 1])
+        new_doc = col_new.text_input("Pridať lekára:")
+        if col_btn.button("➕ Pridať") and new_doc:
+            if new_doc not in st.session_state.config['lekari']:
+                st.session_state.config['lekari'][new_doc] = {"moze": ["Oddelenie"], "active": True}
+                save_config(st.session_state.config)
+                st.success(f"{new_doc} pridaný")
+                st.rerun()
+        
+        for doc, data in st.session_state.config['lekari'].items():
+            with st.expander(f"{doc} {'(Neaktívny)' if not data.get('active', True) else ''}"):
+                c_main1, c_main2 = st.columns(2)
+                act = c_main1.checkbox("Aktívny", value=data.get('active', True), key=f"act_{doc}")
                 
-                c_date1, c_date2 = st.columns([2, 1])
-                new_extra = c_date1.date_input(f"Pridať deň pre {doc}", key=f"date_{doc}")
-                
-                if c_date2.button("➕ Pridať deň", key=f"add_date_{doc}"):
-                    d_str = new_extra.strftime('%Y-%m-%d')
-                    if d_str not in current_extras:
-                        current_extras.append(d_str)
-                        current_extras.sort()
-                        data['extra_dni'] = current_extras
-                        save_config(st.session_state.config)
-                        st.rerun()
-                
-                if current_extras:
-                    st.write("Naplánované dni:")
-                    for ed in current_extras:
-                        c_ex1, c_ex2 = st.columns([3, 1])
-                        c_ex1.text(ed)
-                        if c_ex2.button("❌", key=f"del_{doc}_{ed}"):
-                            current_extras.remove(ed)
+                if not act:
+                    st.markdown("##### 📅 Extra dni (pre neaktívnych)")
+                    current_extras = data.get('extra_dni', [])
+                    c_date1, c_date2 = st.columns([2, 1])
+                    new_extra = c_date1.date_input(f"Pridať deň pre {doc}", key=f"date_{doc}")
+                    if c_date2.button("➕ Pridať deň", key=f"add_date_{doc}"):
+                        d_str = new_extra.strftime('%Y-%m-%d')
+                        if d_str not in current_extras:
+                            current_extras.append(d_str)
+                            current_extras.sort()
                             data['extra_dni'] = current_extras
                             save_config(st.session_state.config)
                             st.rerun()
-            
-            all_places = list(st.session_state.config['ambulancie'].keys()) + ["Oddelenie"]
-            can_do = st.multiselect("Môže pracovať:", all_places, default=[p for p in data.get('moze', []) if p in all_places], key=f"can_{doc}")
-            
-            if act != data.get('active', True) or can_do != data.get('moze', []):
-                data['active'] = act
-                data['moze'] = can_do
-                save_config(st.session_state.config)
-                st.rerun()
-                
-            if st.button(f"🗑️ Odstrániť {doc}", key=f"del_{doc}"):
-                del st.session_state.config['lekari'][doc]
-                save_config(st.session_state.config)
-                st.rerun()
+                            
+                    if current_extras:
+                        st.write("Naplánované dni:")
+                        for ed in current_extras:
+                            c_ex1, c_ex2 = st.columns([3, 1])
+                            c_ex1.text(ed)
+                            if c_ex2.button("❌", key=f"del_{doc}_{ed}"):
+                                current_extras.remove(ed)
+                                data['extra_dni'] = current_extras
+                                save_config(st.session_state.config)
+                                st.rerun()
 
-elif mode == "🏥 Nastavenia ambulancií":
-    st.header("Priority ambulancií")
-    ambs = st.session_state.config['ambulancie']
-    sel_amb = st.selectbox("Ambulancia:", list(ambs.keys()))
-    curr_amb = ambs[sel_amb]
-    st.info(f"Dni: {', '.join(curr_amb['dni'])}")
-    prio = curr_amb['priority']
-    
-    if isinstance(prio, list):
-        new_prio_text = st.text_area(f"Priority pre {sel_amb} (čiarkou):", ", ".join(prio))
-        if st.button("💾 Uložiť"):
-            ambs[sel_amb]['priority'] = [x.strip() for x in new_prio_text.split(',')]
-            save_config(st.session_state.config)
-            st.success("Uložené")
-    else:
-        st.warning("Komplexné priority. Upravte v JSON.")
+                all_places = list(st.session_state.config['ambulancie'].keys()) + ["Oddelenie"]
+                can_do = st.multiselect("Môže pracovať:", all_places, default=[p for p in data.get('moze', []) if p in all_places], key=f"can_{doc}")
+                
+                if act != data.get('active', True) or can_do != data.get('moze', []):
+                    data['active'] = act
+                    data['moze'] = can_do
+                    save_config(st.session_state.config)
+                    st.rerun()
+                    
+                if st.button(f"🗑️ Odstrániť {doc}", key=f"del_{doc}"):
+                    del st.session_state.config['lekari'][doc]
+                    save_config(st.session_state.config)
+                    st.rerun()
+
+    elif mode == "🏥 Nastavenia ambulancií":
+        st.header("Priority ambulancií")
+        ambs = st.session_state.config['ambulancie']
+        sel_amb = st.selectbox("Ambulancia:", list(ambs.keys()))
+        curr_amb = ambs[sel_amb]
+        
+        st.info(f"Dni: {', '.join(curr_amb['dni'])}")
+        prio = curr_amb['priority']
+        
+        if isinstance(prio, list):
+            new_prio_text = st.text_area(f"Priority pre {sel_amb} (čiarkou):", ", ".join(prio))
+            if st.button("💾 Uložiť"):
+                ambs[sel_amb]['priority'] = [x.strip() for x in new_prio_text.split(',')]
+                save_config(st.session_state.config)
+                st.success("Uložené")
+        else:
+            st.warning("Komplexné priority. Upravte v JSON.")
+
+if __name__ == "__main__":
+    main()
