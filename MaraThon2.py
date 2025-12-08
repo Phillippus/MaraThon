@@ -435,12 +435,12 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
         result_raw[doc] = [r[0] for r in rooms]
         if not rooms:
             if doc == head_doc and num_workers >= 3:
-                result_text[doc] = "RT oddelenie"
+                result_text[doc] = "RT odd."
             else:
                 result_text[doc] = "Wolf (0L)" if doc == wolf_doc_name else ""
         else:
             room_str = ", ".join([str(r[0]) for r in rooms])
-            suffix = " + Wolf" if doc == wolf_doc_name else (" + RT oddelenie" if doc == head_doc else "")
+            suffix = " + Wolf" if doc == wolf_doc_name else (" + RT odd." if doc == head_doc else "")
             result_text[doc] = f"{room_str}{suffix}"
     return result_text, result_raw
 
