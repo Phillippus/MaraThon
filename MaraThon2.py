@@ -390,10 +390,19 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
         else:
             caps[d] = 100 
 
-    # --- 2. Kontinuita (zachovanie izieb z minulosti) ---
-    # Toto aplikujeme LEN pre tých, ktorí už niečo mali, aby sme im to "podržali".
-    # Ale ak má niekto 0 (Vidulin), tak mu v tomto kroku nič nepridáme, čo je OK,
-    # lebo ho dobehneme v kroku 3.
+    # --- Výpočet SOFT LIMITU pre kontinuitu ---
+    # Aby sme predišli tomu, že si niekto "naškrečkuje" všetky izby z minulosti
+    # a ostatným (napr. Vidulin) nič neostane.
+    total_beds_available = sum(r[1] for r in available_rooms) # Zatiaľ voľné
+    # Prirátame už obsadené (manual core) pre presnejší priemer
+    total_beds_total = sum(r[1] for r in ROOMS_LIST)
+    
+    # Priemer na lekára
+    avg_beds = total_beds_total / max(len(active_assignees), 1)
+    # Povolíme mierne prekročenie priemeru kvôli kontinuite (napr. 1.3x), ale nie monopoly
+    soft_continuity_limit = max(avg_beds * 1.3, 8) 
+
+    # --- 2. Kontinuita (zachovanie izieb z minulosti) s OBMEDZENÍM ---
     if previous_assignments:
         for doc in active_assignees:
             if doc in previous_assignments:
@@ -406,32 +415,39 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
                 my_prev_rooms.sort(key=lambda x: x[0])
                 
                 for r_obj in my_prev_rooms:
-                    # Prísna kontrola pre všetkých v tejto fáze, aby sme neprestrelili limity hneď
-                    if current_beds[doc] + r_obj[1] <= caps.get(doc, 100):
+                    # Prísna kontrola pre RT (12)
+                    hard_limit = caps.get(doc, 100)
+                    
+                    # Kontrola Soft limitu pre kontinuitu (aby neobsadili všetko)
+                    # Ak lekár už má dosť izieb (nad soft limit), ďalšie staré mu nedáme,
+                    # aby ostali voľné pre tých, čo nemajú nič.
+                    if (current_beds[doc] + r_obj[1] <= hard_limit) and \
+                       (current_beds[doc] + r_obj[1] <= soft_continuity_limit):
                         assignment[doc].append(r_obj)
                         current_beds[doc] += r_obj[1]
                         available_rooms.remove(r_obj)
 
     # --- 3. Rozdelenie zvyšných izieb (AGRESÍVNE Fair Share) ---
     while available_rooms:
-        # Kandidáti sú tí, ktorí nemajú plno
         candidates = [d for d in active_assignees if current_beds[d] < caps.get(d, 100)]
         
         if not candidates:
-             candidates = active_assignees # Musíme preťažiť
+             candidates = active_assignees
 
-        # Zoradenie podľa aktuálneho počtu lôžok (vzostupne)
-        # Kľúčové: Ak má Vidulin 0, bude prvá.
-        candidates.sort(key=lambda d: current_beds[d])
+        # VYLEPŠENÝ SORT:
+        # 1. Podľa počtu lôžok (najmenej prvý)
+        # 2. Ak je zhoda, uprednostni Vidulin (aby dobehla, ak mala predtým 0)
+        def sort_key(d):
+             is_vidulin = 0 if d == "Vidulin" else 1 # Vidulin bude mať 0, ostatní 1 -> pri zhode lôžok ide prvá
+             return (current_beds[d], is_vidulin)
+        
+        candidates.sort(key=sort_key)
         target_doc = candidates[0]
         
         best_room = None
         beds_left = caps.get(target_doc, 100) - current_beds[target_doc]
-        
-        # Hľadáme izbu, čo sa zmestí
         fitting_rooms = [r for r in available_rooms if r[1] <= beds_left]
         
-        # Ak pre RT lekára nie je miesto a má prísny limit, skúsime iného
         if not fitting_rooms and caps.get(target_doc, 100) < 100:
              if len(candidates) > 1:
                  target_doc = candidates[1]
@@ -449,9 +465,6 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
             avg_pos = sum(my_room_nums) / len(my_room_nums)
             best_room = min(fitting_rooms, key=lambda r: abs(r[0] - avg_pos))
         else:
-            # Ak nemá izby (Vidulin), dáme jej prvú dostupnú (najmenšie číslo)
-            # alebo sa snažíme nájsť niečo "pekné" (napr. 3-lôžkovú, aby dobehla rýchlejšie)
-            # Ale zatiaľ stačí prvá v zozname.
             best_room = fitting_rooms[0]
 
         assignment[target_doc].append(best_room)
