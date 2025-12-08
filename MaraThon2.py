@@ -370,10 +370,10 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
     # Definícia aktívnych prijímateľov izieb
     active_assignees = [d for d in doctors_list]
     
-    # OPRAVA: Definícia num_workers
     pure_workers = [d for d in doctors_list if d not in ["Kurisova", "Kohutek"]]
     num_workers = len(pure_workers)
     
+    # Ak je dosť ľudí (aspoň 2 okrem primára), primár neberie izby, ALE len ak nie je RT
     if num_workers >= 2 and head_doc in active_assignees and head_doc != rt_help_doc:
         active_assignees.remove(head_doc)
     
@@ -391,6 +391,9 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
             caps[d] = 100 
 
     # --- 2. Kontinuita (zachovanie izieb z minulosti) ---
+    # Toto aplikujeme LEN pre tých, ktorí už niečo mali, aby sme im to "podržali".
+    # Ale ak má niekto 0 (Vidulin), tak mu v tomto kroku nič nepridáme, čo je OK,
+    # lebo ho dobehneme v kroku 3.
     if previous_assignments:
         for doc in active_assignees:
             if doc in previous_assignments:
@@ -403,21 +406,22 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
                 my_prev_rooms.sort(key=lambda x: x[0])
                 
                 for r_obj in my_prev_rooms:
-                    # Prísna kontrola pre RT, voľná pre ostatných
+                    # Prísna kontrola pre všetkých v tejto fáze, aby sme neprestrelili limity hneď
                     if current_beds[doc] + r_obj[1] <= caps.get(doc, 100):
                         assignment[doc].append(r_obj)
                         current_beds[doc] += r_obj[1]
                         available_rooms.remove(r_obj)
 
-    # --- 3. Rozdelenie zvyšných izieb (Fair Share Algorithm) ---
+    # --- 3. Rozdelenie zvyšných izieb (AGRESÍVNE Fair Share) ---
     while available_rooms:
-        # Kandidáti sú len tí, ktorí nemajú plno
+        # Kandidáti sú tí, ktorí nemajú plno
         candidates = [d for d in active_assignees if current_beds[d] < caps.get(d, 100)]
         
         if not candidates:
              candidates = active_assignees # Musíme preťažiť
 
-        # Zoradenie podľa aktuálneho počtu lôžok -> kto má najmenej, dostane
+        # Zoradenie podľa aktuálneho počtu lôžok (vzostupne)
+        # Kľúčové: Ak má Vidulin 0, bude prvá.
         candidates.sort(key=lambda d: current_beds[d])
         target_doc = candidates[0]
         
@@ -430,19 +434,14 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
         # Ak pre RT lekára nie je miesto a má prísny limit, skúsime iného
         if not fitting_rooms and caps.get(target_doc, 100) < 100:
              if len(candidates) > 1:
-                 # Skúsime druhého v poradí (napr. Vidulin)
                  target_doc = candidates[1]
-                 # Prepočet pre nového kandidáta
                  beds_left = caps.get(target_doc, 100) - current_beds[target_doc]
                  fitting_rooms = [r for r in available_rooms if r[1] <= beds_left]
              
-             # Ak stále nič, tak musíme dať hocičo (alebo nechať neobsadené?)
-             # Radšej preťažíme non-RT lekára
              if not fitting_rooms and caps.get(target_doc, 100) == 100:
                  fitting_rooms = available_rooms
 
         if not fitting_rooms:
-            # Ak sa nedá inak, berieme hocičo dostupné
             fitting_rooms = available_rooms
 
         if assignment[target_doc]:
@@ -450,6 +449,9 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
             avg_pos = sum(my_room_nums) / len(my_room_nums)
             best_room = min(fitting_rooms, key=lambda r: abs(r[0] - avg_pos))
         else:
+            # Ak nemá izby (Vidulin), dáme jej prvú dostupnú (najmenšie číslo)
+            # alebo sa snažíme nájsť niečo "pekné" (napr. 3-lôžkovú, aby dobehla rýchlejšie)
+            # Ale zatiaľ stačí prvá v zozname.
             best_room = fitting_rooms[0]
 
         assignment[target_doc].append(best_room)
