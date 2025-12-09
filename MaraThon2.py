@@ -30,8 +30,8 @@ import urllib.request
 CONFIG_FILE = 'hospital_config.json'
 HISTORY_FILE = 'room_history.json'
 PRIVATE_CALENDAR_URL = "https://calendar.google.com/calendar/ical/fntnonk%40gmail.com/private-e8ce4e0639a626387fff827edd26b87f/basic.ics"
-GIST_FILENAME_CONFIG = "hospital_config_v13.json"
-GIST_FILENAME_HISTORY = "room_history_v13.json"
+GIST_FILENAME_CONFIG = "hospital_config_v14.json"
+GIST_FILENAME_HISTORY = "room_history_v14.json"
 
 ROOMS_LIST = [
     (1, 3), (2, 3), (3, 3), (4, 3), (5, 3),
@@ -188,12 +188,6 @@ def migrate_homolova_to_vidulin(config):
     return config, changed
 
 def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, manual_core=None):
-    """
-    PRIORITY:
-    1. Spravodlivosť (Striktný Target)
-    2. Kontinuita (Len ak neporušuje target)
-    3. Želané izby (Manual Core - rešpektované prednostne, ale zarátané do targetu)
-    """
     if not doctors_list: return {}, {}
     if manual_core is None: manual_core = {}
     if previous_assignments is None: previous_assignments = {}
@@ -205,7 +199,7 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
     current_beds = {d: 0 for d in doctors_list}
     available_rooms = sorted(ROOMS_LIST, key=lambda x: x[0]) 
     
-    # 1. TARGET CALCULATION (Spravodlivosť)
+    # 1. TARGET CALCULATION
     rt_group = [d for d in doctors_list if d == rt_help_doc or d == wolf_doc_name]
     full_group = [d for d in doctors_list if d not in rt_group and d != head_doc]
     if head_doc and head_doc not in rt_group and len(full_group) < 2: full_group.append(head_doc)
@@ -214,7 +208,6 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
     targets = {}
     used_by_rt = 0
     
-    # RT lekári limit 10
     for d in rt_group:
         targets[d] = 10 
         used_by_rt += targets[d]
@@ -226,20 +219,17 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
 
     if head_doc and head_doc not in targets: targets[head_doc] = 0
 
-    # 2. MANUÁLNE PRIDELENIE (Manual Core) - Priorita pred kontinuitou
+    # 2. MANUÁLNE PRIDELENIE
     for doc, nums in manual_core.items():
         if doc not in doctors_list: continue
         for num in nums:
             r_obj = next((r for r in available_rooms if r[0] == num), None)
             if not r_obj: continue
-            
-            # Check target limit pre manual
-            # Ak manual presiahne target, povolíme to? Áno, lebo je to user input.
             assignment[doc].append(r_obj)
             current_beds[doc] += r_obj[1]
             available_rooms.remove(r_obj)
 
-    # 3. KONTINUITA S REDUKCIOU (ak už majú veľa)
+    # 3. KONTINUITA
     if previous_assignments:
         for doc in doctors_list:
             if doc in previous_assignments:
@@ -253,8 +243,7 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
                 allowed_capacity = my_target - current_load
                 
                 if allowed_capacity > 0:
-                    random.shuffle(my_prev) # Náhodný výber pre zachovanie férovosti pri redukcii
-                    
+                    random.shuffle(my_prev)
                     for r_obj in my_prev:
                         if r_obj[1] <= allowed_capacity:
                             assignment[doc].append(r_obj)
@@ -262,19 +251,16 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
                             allowed_capacity -= r_obj[1]
                             available_rooms.remove(r_obj)
 
-    # 4. DOROVNÁVANIE (pre tých čo majú málo)
+    # 4. DOROVNÁVANIE
     while available_rooms:
         candidates = [d for d in doctors_list if current_beds[d] < targets.get(d, 100)]
         if not candidates: candidates = doctors_list
-
         candidates.sort(key=lambda d: current_beds[d])
         receiver = candidates[0]
-        
         best_room = available_rooms[0]
         if assignment[receiver]:
             avgs = sum(r[0] for r in assignment[receiver]) / len(assignment[receiver])
             best_room = min(available_rooms, key=lambda r: abs(r[0] - avgs))
-            
         assignment[receiver].append(best_room)
         current_beds[receiver] += best_room[1]
         available_rooms.remove(best_room)
@@ -616,11 +602,18 @@ if mode == "🚀 Generovať rozpis":
     st.markdown("### Manuálne pridelenie izieb")
     manual_core_input = {}
     ward_docs = [d for d, p in st.session_state.config["lekari"].items() if "Oddelenie" in p.get("moze", []) and p.get("active")]
+    
+    # Grid layout pre manuálne vstupy
     cols = st.columns(2)
     for i, doc in enumerate(ward_docs):
-        txt = cols[i % 2].text_input(f"Dr {doc} – izby (čiarkou):", key=f"core_{doc}")
-        if txt.strip():
-            manual_core_input[doc] = [int(p.strip()) for p in txt.split(',') if p.strip().isdigit()]
+        with cols[i % 2]:
+            val = st.text_input(f"Dr {doc} – izby (napr. 1, 4):", key=f"core_{doc}")
+            if val.strip():
+                try:
+                    manual_core_input[doc] = [int(p.strip()) for p in val.split(',') if p.strip().isdigit()]
+                except:
+                    pass
+    
     if manual_core_input:
         st.session_state.manual_core[start_d.strftime('%Y-%m-%d')] = manual_core_input
 
