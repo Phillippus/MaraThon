@@ -30,8 +30,8 @@ import urllib.request
 CONFIG_FILE = 'hospital_config.json'
 HISTORY_FILE = 'room_history.json'
 PRIVATE_CALENDAR_URL = "https://calendar.google.com/calendar/ical/fntnonk%40gmail.com/private-e8ce4e0639a626387fff827edd26b87f/basic.ics"
-GIST_FILENAME_CONFIG = "hospital_config_v15.json"
-GIST_FILENAME_HISTORY = "room_history_v15.json"
+GIST_FILENAME_CONFIG = "hospital_config_v16.json"
+GIST_FILENAME_HISTORY = "room_history_v16.json"
 
 ROOMS_LIST = [
     (1, 3), (2, 3), (3, 3), (4, 3), (5, 3),
@@ -187,9 +187,15 @@ def migrate_homolova_to_vidulin(config):
                     changed = True
     return config, changed
 
-def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, manual_core=None):
+def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, manual_preferences=None):
+    """
+    PRIORITY:
+    1. Spravodlivosť (Hard Caps)
+    2. Preferencie (Manual - pokiaľ sa zmestia do limitu)
+    3. Kontinuita (Previous - pokiaľ sa zmestia do limitu)
+    """
     if not doctors_list: return {}, {}
-    if manual_core is None: manual_core = {}
+    if manual_preferences is None: manual_preferences = {}
     if previous_assignments is None: previous_assignments = {}
     
     rt_help_doc = "Miklatkova" if "Miklatkova" in doctors_list else None
@@ -199,7 +205,7 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
     current_beds = {d: 0 for d in doctors_list}
     available_rooms = sorted(ROOMS_LIST, key=lambda x: x[0]) 
     
-    # 1. TARGET CALCULATION
+    # --- 1. TARGET CALCULATION (SPRAVODLIVOSŤ) ---
     rt_group = [d for d in doctors_list if d == rt_help_doc or d == wolf_doc_name]
     full_group = [d for d in doctors_list if d not in rt_group and d != head_doc]
     if head_doc and head_doc not in rt_group and len(full_group) < 2: full_group.append(head_doc)
@@ -208,32 +214,38 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
     targets = {}
     used_by_rt = 0
     
-    # Zmena: Dynamický limit pre RT (Miklatkova)
-    # Ak je veľa full-time lekárov (>2), tak limit pre RT je len 9. Inak 10.
-    rt_limit = 9 if len(full_group) >= 3 else 10
-    
+    # RT lekári limit: 12 (alebo 9 ak je veľa full-time)
+    rt_limit = 9 if len(full_group) >= 3 else 12
     for d in rt_group:
         targets[d] = rt_limit
         used_by_rt += targets[d]
         
     beds_for_full = total_beds - used_by_rt
     if full_group:
-        fair_share = math.floor(beds_for_full / len(full_group))
+        # Full time max 15
+        fair_share = min(15, math.floor(beds_for_full / len(full_group)) + 1)
         for d in full_group: targets[d] = fair_share
 
     if head_doc and head_doc not in targets: targets[head_doc] = 0
 
-    # 2. MANUÁLNE PRIDELENIE
-    for doc, nums in manual_core.items():
+    # --- 2. PREFERENCIE (MANUAL) - majú prednosť pred kontinuitou ---
+    # Ale musia rešpektovať targety!
+    for doc, nums in manual_preferences.items():
         if doc not in doctors_list: continue
+        
+        my_target = targets.get(doc, 15)
         for num in nums:
             r_obj = next((r for r in available_rooms if r[0] == num), None)
             if not r_obj: continue
-            assignment[doc].append(r_obj)
-            current_beds[doc] += r_obj[1]
-            available_rooms.remove(r_obj)
+            
+            # Check kapacity
+            if current_beds[doc] + r_obj[1] <= my_target:
+                assignment[doc].append(r_obj)
+                current_beds[doc] += r_obj[1]
+                available_rooms.remove(r_obj)
 
-    # 3. KONTINUITA
+    # --- 3. KONTINUITA (PREVIOUS) ---
+    # Doplníme z minulosti, ak sa zmestí do targetu
     if previous_assignments:
         for doc in doctors_list:
             if doc in previous_assignments:
@@ -242,29 +254,36 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
                     found = next((r for r in available_rooms if r[0] == r_id), None)
                     if found: my_prev.append(found)
                 
-                my_target = targets.get(doc, 100)
-                current_load = current_beds[doc]
-                allowed_capacity = my_target - current_load
+                my_target = targets.get(doc, 15)
+                # Náhodne premiešať, aby sa nestalo, že vždy zoberie tie isté malé izby a ignoruje veľké
+                # alebo naopak. Chceme aby to bolo fér.
+                random.shuffle(my_prev)
                 
-                if allowed_capacity > 0:
-                    random.shuffle(my_prev)
-                    for r_obj in my_prev:
-                        if r_obj[1] <= allowed_capacity:
-                            assignment[doc].append(r_obj)
-                            current_beds[doc] += r_obj[1]
-                            allowed_capacity -= r_obj[1]
-                            available_rooms.remove(r_obj)
+                for r_obj in my_prev:
+                    if current_beds[doc] + r_obj[1] <= my_target:
+                        assignment[doc].append(r_obj)
+                        current_beds[doc] += r_obj[1]
+                        available_rooms.remove(r_obj)
 
-    # 4. DOROVNÁVANIE
+    # --- 4. DOROVNÁVANIE (pre tých čo majú málo) ---
     while available_rooms:
-        candidates = [d for d in doctors_list if current_beds[d] < targets.get(d, 100)]
-        if not candidates: candidates = doctors_list
+        # Kto je najviac pod svojím targetom?
+        candidates = [d for d in doctors_list if current_beds[d] < targets.get(d, 15)]
+        
+        if not candidates:
+             # Ak sú všetci naplnení, ale ostali izby (napr. kvôli zaokrúhľovaniu),
+             # daj tomu, kto má najmenej celkovo
+             candidates = doctors_list
+        
         candidates.sort(key=lambda d: current_beds[d])
         receiver = candidates[0]
+        
+        # Snaž sa dať izbu blízko tým, čo už má
         best_room = available_rooms[0]
         if assignment[receiver]:
             avgs = sum(r[0] for r in assignment[receiver]) / len(assignment[receiver])
             best_room = min(available_rooms, key=lambda r: abs(r[0] - avgs))
+            
         assignment[receiver].append(best_room)
         current_beds[receiver] += best_room[1]
         available_rooms.remove(best_room)
@@ -330,7 +349,9 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
 
     all_doctors.sort()
     history = load_history()
+    # Pôvodná kontinuita z histórie (predošlý deň pred začiatkom)
     last_day_assignments = history.get((thursday - timedelta(days=1)).strftime('%Y-%m-%d'), {})
+    
     manual_all = st.session_state.get("manual_core", {})
     closures = config.get('closures', {})
     
@@ -397,9 +418,27 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
             if wolf_doc and wolf_doc not in ward_cands and "Oddelenie" in config['lekari'].get(wolf_doc, {}).get('moze', []):
                 ward_cands.append(wolf_doc)
             
-            manual = manual_all.get(date_key, {})
-            room_text_map, room_raw_map = distribute_rooms(ward_cands, wolf_doc, last_day_assignments, manual)
+            # --- ZÍSKANIE PREFERENCIÍ PRE TENTO DEŇ ---
+            # Skús nájsť špecifické pre tento dátum
+            daily_pref = manual_all.get(date_key, {})
+            
+            # Ak nie sú, skús nájsť "globálne" z prvého dňa generovania (ak sme práve v tom týždni)
+            if not daily_pref and i < 7:
+                 # Hack: Ak užívateľ zadal preferencie len pre prvý deň, použijeme ich ako template
+                 # pre celý týždeň, aby sa nastavila nová kontinuita.
+                 # Skontrolujeme, či existuje kľúč pre prvý deň generovania
+                 first_day_key = dates[0] if dates else date_key
+                 # Pozor: dates je formát d.m.Y, kľúč v manual_all je Y-m-d.
+                 # Musíme nájsť kľúč zodpovedajúci start_date
+                 start_key = start_date.strftime('%Y-%m-%d')
+                 if start_key in manual_all:
+                     daily_pref = manual_all[start_key]
+
+            room_text_map, room_raw_map = distribute_rooms(ward_cands, wolf_doc, last_day_assignments, daily_pref)
+            
+            # Aktualizácia kontinuity pre ďalší deň
             last_day_assignments = room_raw_map
+            
             if save_hist: history[date_key] = room_raw_map
         
         for doc in all_doctors:
