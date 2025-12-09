@@ -30,8 +30,8 @@ import urllib.request
 CONFIG_FILE = 'hospital_config.json'
 HISTORY_FILE = 'room_history.json'
 PRIVATE_CALENDAR_URL = "https://calendar.google.com/calendar/ical/fntnonk%40gmail.com/private-e8ce4e0639a626387fff827edd26b87f/basic.ics"
-GIST_FILENAME_CONFIG = "hospital_config_v12.json"
-GIST_FILENAME_HISTORY = "room_history_v12.json"
+GIST_FILENAME_CONFIG = "hospital_config_v13.json"
+GIST_FILENAME_HISTORY = "room_history_v13.json"
 
 ROOMS_LIST = [
     (1, 3), (2, 3), (3, 3), (4, 3), (5, 3),
@@ -45,13 +45,11 @@ def setup_pdf_fonts():
     font_dir = "/tmp"
     font_name = "DejaVuSans"
     font_path = os.path.join(font_dir, f"{font_name}.ttf")
-    
     try:
         if os.path.exists(font_path):
             pdfmetrics.registerFont(TTFont(font_name, font_path))
             return font_name
-    except:
-        pass
+    except: pass
     
     if not os.path.exists(font_path):
         try:
@@ -59,8 +57,7 @@ def setup_pdf_fonts():
             urllib.request.urlretrieve(font_url, font_path)
             pdfmetrics.registerFont(TTFont(font_name, font_path))
             return font_name
-        except:
-            pass
+        except: pass
     return "Helvetica"
 
 # --- GIST ULOŽISKO ---
@@ -192,9 +189,10 @@ def migrate_homolova_to_vidulin(config):
 
 def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, manual_core=None):
     """
-    LOGIKA NULOVÁ TOLERANCIA:
-    Ak je detekovaná nerovnováha (návrat z dovolenky), ignoruje sa kontinuita.
-    Tým, čo majú veľa, sa NÁHODNE odoberú izby, až kým neklesnú na priemer.
+    PRIORITY:
+    1. Spravodlivosť (Striktný Target)
+    2. Kontinuita (Len ak neporušuje target)
+    3. Želané izby (Manual Core - rešpektované prednostne, ale zarátané do targetu)
     """
     if not doctors_list: return {}, {}
     if manual_core is None: manual_core = {}
@@ -207,17 +205,7 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
     current_beds = {d: 0 for d in doctors_list}
     available_rooms = sorted(ROOMS_LIST, key=lambda x: x[0]) 
     
-    # 1. Manuálne pridelenie (Core)
-    for doc, nums in manual_core.items():
-        if doc not in doctors_list: continue
-        for num in nums:
-            r_obj = next((r for r in available_rooms if r[0] == num), None)
-            if not r_obj: continue
-            assignment[doc].append(r_obj)
-            current_beds[doc] += r_obj[1]
-            available_rooms.remove(r_obj)
-    
-    # 2. Výpočet TARGETS
+    # 1. TARGET CALCULATION (Spravodlivosť)
     rt_group = [d for d in doctors_list if d == rt_help_doc or d == wolf_doc_name]
     full_group = [d for d in doctors_list if d not in rt_group and d != head_doc]
     if head_doc and head_doc not in rt_group and len(full_group) < 2: full_group.append(head_doc)
@@ -226,12 +214,11 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
     targets = {}
     used_by_rt = 0
     
-    # RT lekári - limit 10
+    # RT lekári limit 10
     for d in rt_group:
         targets[d] = 10 
         used_by_rt += targets[d]
         
-    # Full lekári - zvyšok rovno
     beds_for_full = total_beds - used_by_rt
     if full_group:
         fair_share = math.floor(beds_for_full / len(full_group))
@@ -239,58 +226,50 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
 
     if head_doc and head_doc not in targets: targets[head_doc] = 0
 
-    # 3. Kontinuita s "KRÁDEŽOU"
+    # 2. MANUÁLNE PRIDELENIE (Manual Core) - Priorita pred kontinuitou
+    for doc, nums in manual_core.items():
+        if doc not in doctors_list: continue
+        for num in nums:
+            r_obj = next((r for r in available_rooms if r[0] == num), None)
+            if not r_obj: continue
+            
+            # Check target limit pre manual
+            # Ak manual presiahne target, povolíme to? Áno, lebo je to user input.
+            assignment[doc].append(r_obj)
+            current_beds[doc] += r_obj[1]
+            available_rooms.remove(r_obj)
+
+    # 3. KONTINUITA S REDUKCIOU (ak už majú veľa)
     if previous_assignments:
-        # Prechádzame lekárov
         for doc in doctors_list:
             if doc in previous_assignments:
-                # Získaj ich izby
                 my_prev = []
                 for r_id in previous_assignments[doc]:
                     found = next((r for r in available_rooms if r[0] == r_id), None)
                     if found: my_prev.append(found)
                 
-                # Zistíme, koľko môžu mať max
                 my_target = targets.get(doc, 100)
+                current_load = current_beds[doc]
+                allowed_capacity = my_target - current_load
                 
-                # Ak majú viac ako target -> NÁHODNE zamiešame a vyberieme len toľko, koľko sa zmestí
-                current_load_from_core = current_beds[doc]
-                allowed_capacity = my_target - current_load_from_core
-                
-                if allowed_capacity <= 0:
-                    # Už majú plno z core, všetko z minulosti pustia
-                    pass
-                else:
-                    # Zamiešame, aby to nebolo stále tie isté
-                    random.shuffle(my_prev)
-                    
-                    kept_rooms = []
-                    load_so_far = 0
+                if allowed_capacity > 0:
+                    random.shuffle(my_prev) # Náhodný výber pre zachovanie férovosti pri redukcii
                     
                     for r_obj in my_prev:
-                        if load_so_far + r_obj[1] <= allowed_capacity:
-                            kept_rooms.append(r_obj)
-                            load_so_far += r_obj[1]
-                        else:
-                            # Tieto izby sa "ukradnú" a ostanú v available_rooms
-                            pass
-                    
-                    # Priradíme tie, čo prežili čistku
-                    for r in kept_rooms:
-                        assignment[doc].append(r)
-                        current_beds[doc] += r[1]
-                        available_rooms.remove(r)
+                        if r_obj[1] <= allowed_capacity:
+                            assignment[doc].append(r_obj)
+                            current_beds[doc] += r_obj[1]
+                            allowed_capacity -= r_obj[1]
+                            available_rooms.remove(r_obj)
 
-    # 4. Dorovnávanie (pre tých, čo majú málo - napr. Vidulin)
+    # 4. DOROVNÁVANIE (pre tých čo majú málo)
     while available_rooms:
         candidates = [d for d in doctors_list if current_beds[d] < targets.get(d, 100)]
         if not candidates: candidates = doctors_list
 
-        # Najprv ten, kto má absolútne najmenej
         candidates.sort(key=lambda d: current_beds[d])
         receiver = candidates[0]
         
-        # Ak už má izby, skúsime nájsť blízku, inak prvú voľnú
         best_room = available_rooms[0]
         if assignment[receiver]:
             avgs = sum(r[0] for r in assignment[receiver]) / len(assignment[receiver])
@@ -300,7 +279,6 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
         current_beds[receiver] += best_room[1]
         available_rooms.remove(best_room)
 
-    # Výstup
     result_text, result_raw = {}, {}
     for doc in doctors_list:
         rooms = sorted(assignment[doc], key=lambda x: x[0])
@@ -446,6 +424,26 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
                 
         if save_hist: save_history(history)
     return dates, data_grid, all_doctors, doctors_info
+
+def scan_future_problems(config, weeks_ahead=12):
+    problems = []
+    start = datetime.now()
+    end = start + timedelta(weeks=weeks_ahead)
+    absences = get_ical_events(start, end)
+    closures = config.get('closures', {})
+    current = start
+    while current <= end:
+        dates, grid, docs, info = generate_data_structure(config, absences, current, save_hist=False)
+        for date_str in dates:
+            date_obj = datetime.strptime(date_str, '%d.%m.%Y')
+            date_key = date_obj.strftime('%Y-%m-%d')
+            closed_today = closures.get(date_key, [])
+            for amb_name in ["Konziliarna", "Velka dispenzarna", "Mala dispenzarna", "Radio 2A", "Radio 2B", "Chemo 8A", "Chemo 8B", "Chemo 8C", "Wolf"]:
+                val = grid[date_str].get(amb_name, "")
+                if val in ["NEOBSADENÉ", "???", ""] and amb_name not in closed_today and "ODDELENIE (Celé)" not in closed_today:
+                     problems.append({"Dátum": date_str, "Pracovisko": amb_name})
+        current += timedelta(weeks=1)
+    return pd.DataFrame(problems) if problems else None
 
 def create_display_df(dates, data_grid, all_doctors, doctors_info, motto, config):
     rows = []
@@ -615,8 +613,24 @@ if mode == "🚀 Generovať rozpis":
                 save_config(st.session_state.config)
                 st.rerun()
 
-    c1, c2, c3 = st.columns(3)
-    if c1.button("🚀 Generovať", type="primary"):
+    st.markdown("### Manuálne pridelenie izieb")
+    manual_core_input = {}
+    ward_docs = [d for d, p in st.session_state.config["lekari"].items() if "Oddelenie" in p.get("moze", []) and p.get("active")]
+    cols = st.columns(2)
+    for i, doc in enumerate(ward_docs):
+        txt = cols[i % 2].text_input(f"Dr {doc} – izby (čiarkou):", key=f"core_{doc}")
+        if txt.strip():
+            manual_core_input[doc] = [int(p.strip()) for p in txt.split(',') if p.strip().isdigit()]
+    if manual_core_input:
+        st.session_state.manual_core[start_d.strftime('%Y-%m-%d')] = manual_core_input
+
+    c_btn1, c_btn2, c_btn3 = st.columns(3)
+    gen_clicked = c_btn1.button("🚀 Generovať rozpis", type="primary")
+    scan_clicked = c_btn2.button("🔭 Vyhliadka ďalších týždňov")
+    clear_hist = c_btn3.button("🗑️ Reset histórie")
+    weeks_num = st.number_input("Počet týždňov pre vyhliadku:", min_value=1, max_value=52, value=12)
+
+    if gen_clicked:
         with st.spinner("..."):
             end_d = start_d + timedelta(days=14)
             ab = get_ical_events(datetime.combine(start_d, datetime.min.time()), datetime.combine(end_d, datetime.min.time()))
@@ -625,7 +639,16 @@ if mode == "🚀 Generovať rozpis":
             st.session_state.df_display.columns = ["Sekcia / Dátum"] + ds
         st.success("Hotovo!")
     
-    if c3.button("🗑️ Reset histórie"):
+    if scan_clicked:
+        with st.spinner(f"Pozerám {weeks_num} týždňov dopredu..."):
+            problems_df = scan_future_problems(st.session_state.config, weeks_ahead=weeks_num)
+            if problems_df is not None and not problems_df.empty:
+                st.subheader("🔭 Vyhliadka ďalších týždňov – problémové dni")
+                st.dataframe(problems_df, use_container_width=True, hide_index=True)
+            else:
+                st.success("✅ V zadanom období nie sú žiadne neobsadené pracoviská.")
+
+    if clear_hist:
         save_history({})
         st.success("História zmazaná")
 
