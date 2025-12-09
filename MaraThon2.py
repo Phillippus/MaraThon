@@ -30,8 +30,8 @@ import urllib.request
 CONFIG_FILE = 'hospital_config.json'
 HISTORY_FILE = 'room_history.json'
 PRIVATE_CALENDAR_URL = "https://calendar.google.com/calendar/ical/fntnonk%40gmail.com/private-e8ce4e0639a626387fff827edd26b87f/basic.ics"
-GIST_FILENAME_CONFIG = "hospital_config_v14.json"
-GIST_FILENAME_HISTORY = "room_history_v14.json"
+GIST_FILENAME_CONFIG = "hospital_config_v15.json"
+GIST_FILENAME_HISTORY = "room_history_v15.json"
 
 ROOMS_LIST = [
     (1, 3), (2, 3), (3, 3), (4, 3), (5, 3),
@@ -208,8 +208,12 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
     targets = {}
     used_by_rt = 0
     
+    # Zmena: Dynamický limit pre RT (Miklatkova)
+    # Ak je veľa full-time lekárov (>2), tak limit pre RT je len 9. Inak 10.
+    rt_limit = 9 if len(full_group) >= 3 else 10
+    
     for d in rt_group:
-        targets[d] = 10 
+        targets[d] = rt_limit
         used_by_rt += targets[d]
         
     beds_for_full = total_beds - used_by_rt
@@ -602,8 +606,6 @@ if mode == "🚀 Generovať rozpis":
     st.markdown("### Manuálne pridelenie izieb")
     manual_core_input = {}
     ward_docs = [d for d, p in st.session_state.config["lekari"].items() if "Oddelenie" in p.get("moze", []) and p.get("active")]
-    
-    # Grid layout pre manuálne vstupy
     cols = st.columns(2)
     for i, doc in enumerate(ward_docs):
         with cols[i % 2]:
@@ -611,8 +613,7 @@ if mode == "🚀 Generovať rozpis":
             if val.strip():
                 try:
                     manual_core_input[doc] = [int(p.strip()) for p in val.split(',') if p.strip().isdigit()]
-                except:
-                    pass
+                except: pass
     
     if manual_core_input:
         st.session_state.manual_core[start_d.strftime('%Y-%m-%d')] = manual_core_input
