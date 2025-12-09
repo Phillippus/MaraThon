@@ -477,7 +477,7 @@ def scan_future_problems(config, weeks_ahead=12):
 def create_display_df(dates, data_grid, all_doctors, doctors_info, motto, config):
     rows = []
     ward_doctors = [d for d in all_doctors if "Oddelenie" in config['lekari'][d].get('moze', [])]
-    display_map = { "Radio 2A": "Radio 2A", "Konziliarna": "Konziliárna amb.", "Velka dispenzarna": "veľký dispenzár", "Mala dispenzarna": "malý dispenzár" }
+    display_map = { "Radio 2A": "Radio 2A", "Konziliarna": "Konziliárna amb.", "Velka dispenzarna": "velký dispenzár", "Mala dispenzarna": "malý dispenzár" }
     
     rows.append(["Oddelenie"] + dates)
     for doc in ward_doctors:
