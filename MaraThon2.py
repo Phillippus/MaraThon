@@ -30,8 +30,8 @@ import urllib.request
 CONFIG_FILE = 'hospital_config.json'
 HISTORY_FILE = 'room_history.json'
 PRIVATE_CALENDAR_URL = "https://calendar.google.com/calendar/ical/fntnonk%40gmail.com/private-e8ce4e0639a626387fff827edd26b87f/basic.ics"
-GIST_FILENAME_CONFIG = "hospital_config_v18.json"
-GIST_FILENAME_HISTORY = "room_history_v18.json"
+GIST_FILENAME_CONFIG = "hospital_config_v19.json"
+GIST_FILENAME_HISTORY = "room_history_v19.json"
 
 ROOMS_LIST = [
     (1, 3), (2, 3), (3, 3), (4, 3), (5, 3),
@@ -199,7 +199,7 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
     current_beds = {d: 0 for d in doctors_list}
     available_rooms = sorted(ROOMS_LIST, key=lambda x: x[0]) 
     
-    # --- 1. TARGET CALCULATION (SPRAVODLIVOSŤ) ---
+    # --- 1. TARGET CALCULATION ---
     rt_group = [d for d in doctors_list if d == rt_help_doc or d == wolf_doc_name]
     full_group = [d for d in doctors_list if d not in rt_group and d != head_doc]
     if head_doc and head_doc not in rt_group and len(full_group) < 2: full_group.append(head_doc)
@@ -306,13 +306,29 @@ def get_ical_events(start_date, end_date):
         return absences
     except: return {}
 
+def build_absence_table(absences, start_d):
+    data = []
+    end_d = start_d + timedelta(days=7)
+    for i in range((end_d - start_d).days + 1):
+        d = start_d + timedelta(days=i)
+        d_key = d.strftime('%Y-%m-%d')
+        if d_key in absences:
+            for name, typ in absences[d_key].items():
+                 data.append({"Dátum": d.strftime('%d.%m.%Y'), "Lekár": name, "Dôvod": typ})
+    if 
+        return pd.DataFrame(data).sort_values(by=["Dátum", "Lekár"])
+    return pd.DataFrame(columns=["Dátum", "Lekár", "Dôvod"])
+
 def generate_data_structure(config, absences, start_date, save_hist=True):
     days_map = {0: "Pondelok", 1: "Utorok", 2: "Streda", 3: "Stvrtok", 4: "Piatok"}
     weekday = start_date.weekday()
     thursday = start_date + timedelta(days=(3 - weekday) % 7)
     dates, data_grid = [], {}
     all_doctors, doctors_info = [], {}
-    week_dates_str = [(thursday + timedelta(days=i)).strftime('%Y-%m-%d') for i in range(7) if (thursday + timedelta(days=i)).weekday() < 5]
+    week_dates_str = []
+    for i in range(7):
+        d = thursday + timedelta(days=i)
+        if d.weekday() < 5: week_dates_str.append(d.strftime('%Y-%m-%d'))
 
     for d_name, props in config['lekari'].items():
         if props.get('active', True) or any(ed in week_dates_str for ed in props.get('extra_dni', [])):
@@ -327,6 +343,8 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
     manual_all = st.session_state.get("manual_core", {})
     closures = config.get('closures', {})
     
+    dates_raw = []
+
     for i in range(7):
         curr_date = thursday + timedelta(days=i)
         day_name = days_map.get(curr_date.weekday())
@@ -334,6 +352,7 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
         date_str = curr_date.strftime('%d.%m.%Y')
         date_key = curr_date.strftime('%Y-%m-%d')
         dates.append(date_str)
+        dates_raw.append(date_key)
         day_absences = absences.get(date_key, {})
         closed_today = closures.get(date_key, [])
         data_grid[date_str] = {}
@@ -412,7 +431,7 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
                 data_grid[date_str][doc] = " + ".join(my) if my else ""
                 
         if save_hist: save_history(history)
-    return dates, data_grid, all_doctors, doctors_info
+    return dates, data_grid, all_doctors, doctors_info, dates_raw
 
 def scan_future_problems(config, weeks_ahead=12):
     problems = []
@@ -422,7 +441,7 @@ def scan_future_problems(config, weeks_ahead=12):
     closures = config.get('closures', {})
     current = start
     while current <= end:
-        dates, grid, docs, info = generate_data_structure(config, absences, current, save_hist=False)
+        dates, grid, docs, info, _ = generate_data_structure(config, absences, current, save_hist=False)
         for date_str in dates:
             date_obj = datetime.strptime(date_str, '%d.%m.%Y')
             date_key = date_obj.strftime('%Y-%m-%d')
@@ -630,9 +649,12 @@ if mode == "🚀 Generovať rozpis":
         with st.spinner("..."):
             end_d = start_d + timedelta(days=14)
             ab = get_ical_events(datetime.combine(start_d, datetime.min.time()), datetime.combine(end_d, datetime.min.time()))
-            ds, g, d, di = generate_data_structure(st.session_state.config, ab, start_d)
+            # Generovanie a uloženie pomocných dát
+            ds, g, d, di, raw_dates = generate_data_structure(st.session_state.config, ab, start_d)
+            st.session_state.dates_raw = raw_dates
             st.session_state.df_generated = create_display_df(ds, g, d, di, st.session_state.motto, st.session_state.config)
             st.session_state.df_generated.columns = ["Sekcia / Dátum"] + ds
+            st.session_state.absences_df = build_absence_table(ab, start_d)
         st.success("Hotovo!")
     
     if scan_clicked:
@@ -650,7 +672,12 @@ if mode == "🚀 Generovať rozpis":
 
     if 'df_generated' in st.session_state:
         st.markdown("---")
-        st.info("✏️ Tabuľku môžete priamo editovať. Zmeny sa prejavia v exportoch nižšie.")
+        
+        if 'absences_df' in st.session_state and not st.session_state.absences_df.empty:
+            with st.expander("📋 Prehľad neprítomností (Dovolenky, PN, Stáže)", expanded=True):
+                st.dataframe(st.session_state.absences_df, use_container_width=True, hide_index=True)
+
+        st.info("✏️ Tabuľku nižšie môžete priamo editovať. Zmeny sa prejavia v exportoch.")
         
         # Interaktívna editácia
         edited_df = st.data_editor(
@@ -660,13 +687,52 @@ if mode == "🚀 Generovať rozpis":
             key="final_editor"
         )
         
-        # Exporty používajú "edited_df", nie pôvodný "df_generated"
+        # Tlačidlo pre uloženie manuálnych zmien do histórie (kontinuity)
+        if 'dates_raw' in st.session_state:
+             if st.button("💾 Uložiť aktuálne rozdelenie izieb do histórie (kontinuita)"):
+                try:
+                    history = load_history()
+                    # Prechádzame stĺpce (dni)
+                    # edited_df má prvý stĺpec "Sekcia / Dátum", ostatné sú dátumy
+                    cols = edited_df.columns
+                    for i, date_key in enumerate(st.session_state.dates_raw):
+                        col_idx = i + 1  # preskočíme prvý stĺpec
+                        if col_idx >= len(cols): break
+                        
+                        col_name = cols[col_idx]
+                        day_map = {}
+                        
+                        # Prechádzame riadky
+                        for idx, row in edited_df.iterrows():
+                            label = str(row[cols[0]])
+                            # Hľadáme riadky lekárov (začínajú "Dr ")
+                            if label.startswith("Dr "):
+                                doc_name = label.replace("Dr ", "").split(" ")[0].strip() # Orezanie "⚠ len..."
+                                cell_val = str(row[col_name])
+                                
+                                # Extrakcia čísiel izieb (pred prvým +)
+                                # Napr: "3, 4 + RT oddelenie" -> "3, 4" -> [3, 4]
+                                room_part = cell_val.split('+')[0]
+                                nums = []
+                                for piece in room_part.split(','):
+                                    piece = piece.strip()
+                                    if piece.isdigit():
+                                        nums.append(int(piece))
+                                
+                                if nums:
+                                    day_map[doc_name] = nums
+                        
+                        # Uloženie mapy pre daný deň
+                        if day_map:
+                            history[date_key] = day_map
+                    
+                    save_history(history)
+                    st.success("✅ Rozdelenie izieb bolo uložené. Ďalšie generovanie bude nadväzovať na tieto zmeny.")
+                except Exception as e:
+                    st.error(f"Chyba pri ukladaní: {e}")
+
+        # Exporty používajú "edited_df"
         export_df = edited_df.copy()
-        # Oprava headerov pre export (prvý riadok v DF sú stĺpce, ale v exporte chceme čisté dáta)
-        # create_excel_report očakáva, že prvý riadok dát je header, ale data_editor má header v .columns
-        # Upravíme export_df tak, aby sedel formát pre create_excel_report
-        # V predchádzajúcej verzii sme robili: df.iloc[0, 1:] = df.columns[1:] - to tu už netreba, lebo editor má správne stĺpce
-        # Ale create_excel_report očakáva špecifickú štruktúru.
         
         # Vytvorenie exportov
         xlsx = create_excel_report(export_df)
