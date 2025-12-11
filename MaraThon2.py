@@ -30,8 +30,8 @@ import urllib.request
 CONFIG_FILE = 'hospital_config.json'
 HISTORY_FILE = 'room_history.json'
 PRIVATE_CALENDAR_URL = "https://calendar.google.com/calendar/ical/fntnonk%40gmail.com/private-e8ce4e0639a626387fff827edd26b87f/basic.ics"
-GIST_FILENAME_CONFIG = "hospital_config_v25.json"
-GIST_FILENAME_HISTORY = "room_history_v25.json"
+GIST_FILENAME_CONFIG = "hospital_config_v26.json"
+GIST_FILENAME_HISTORY = "room_history_v26.json"
 
 ROOMS_LIST = [
     (1, 3), (2, 3), (3, 3), (4, 3), (5, 3),
@@ -116,6 +116,16 @@ def load_config():
     if 'closures' not in config:
         config['closures'] = {}
         changed = True
+    
+    # Pridanie sekcie pre absencie, ak chyba
+    if 'email_settings_absences' not in config:
+        config['email_settings_absences'] = { 
+            "default_to": "", 
+            "default_subject": "Prehľad neprítomností", 
+            "default_body": "Dobrý deň,\nv prílohe posielam prehľad neprítomností." 
+        }
+        changed = True
+        
     if changed: save_config(config)
     return config
 
@@ -138,6 +148,7 @@ def get_default_config():
         "total_beds": 42,
         "closures": {}, 
         "email_settings": { "default_to": "", "default_subject": "Rozpis služieb", "default_body": "Dobrý deň,\nv prílohe rozpis." },
+        "email_settings_absences": { "default_to": "", "default_subject": "Prehľad neprítomností", "default_body": "Dobrý deň,\nv prílohe posielam prehľad neprítomností." },
         "ambulancie": {
             "Konziliarna": { "dni": ["Pondelok", "Utorok", "Streda", "Stvrtok", "Piatok"], "priority": ["Kohutekova", "Kohutek", "Bystricky", "Zavrelova"] },
             "Velka dispenzarna": { "dni": ["Pondelok", "Utorok", "Streda", "Stvrtok", "Piatok"], "priority": ["Bocak", "Stratena", "Vidulin", "Kurisova", "Blahova", "Hrabosova", "Miklatkova", "Martinka"] },
@@ -551,36 +562,68 @@ def create_excel_report(df):
         for i in range(2, len(df.columns) + 1): ws.column_dimensions[get_column_letter(i)].width = 18
     return output.getvalue()
 
-def create_pdf_report(df, motto):
+def create_pdf_report(df, motto, title_prefix="Rozpis prác"):
     buffer = io.BytesIO()
     font_name = setup_pdf_fonts()
     doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), rightMargin=10, leftMargin=10, topMargin=10, bottomMargin=10)
     styles = getSampleStyleSheet()
     cell_style = ParagraphStyle('C', parent=styles['Normal'], fontName=font_name, fontSize=7, leading=8, alignment=1)
-    data = [[Paragraph(str(c), ParagraphStyle('H', parent=styles['Normal'], fontName=font_name, fontSize=8, alignment=1)) for c in df.columns]]
-    for _, row in df.iterrows():
-        row_data = []
-        is_motto = (row[0] == (motto or "Motto"))
-        for i, val in enumerate(row.values):
-            txt = str(val) if val else ""
-            if is_motto and i==0: 
-                p = Paragraph(f"<para align='center'><b><i>{txt}</i></b></para>", ParagraphStyle('M', parent=cell_style, fontSize=9, padding=6, alignment=1))
-            elif is_motto: p = ""
-            elif i==0: p = Paragraph(f"<b>{txt}</b>", cell_style)
-            else: p = Paragraph(txt, cell_style)
-            row_data.append(p)
-        data.append(row_data)
-    t = Table(data, colWidths=[130] + [135]*(len(df.columns)-1))
-    style = TableStyle([('GRID', (0,0), (-1,-1), 0.5, colors.black), ('VALIGN', (0,0), (-1,-1), 'MIDDLE'), ('BACKGROUND', (0,0), (-1,0), colors.grey)])
-    for i, row in enumerate(df.iterrows()):
-        if row[1][0] in ["Oddelenie", "Konziliárna amb", "RT ambulancie", "Chemo amb", "Disp. Ambulancia", "RTG Terapia"]:
-            style.add('BACKGROUND', (0, i+1), (-1, i+1), colors.lightgrey)
-        if row[1][0] == (motto or "Motto"):
-            style.add('SPAN', (0, i+1), (-1, i+1))
-            style.add('BACKGROUND', (0, i+1), (-1, i+1), colors.whitesmoke)
-            style.add('ALIGN', (0, i+1), (-1, i+1), 'CENTER')
-    t.setStyle(style)
-    doc.build([Paragraph(f"Rozpis prác {df.columns[1]} - {df.columns[-1]}", styles['Title']), t])
+    
+    # Pre absencie pouzivame inu strukturu, pre rozpis inu
+    # Ak je to absencna tabulka, je jednoduchsia
+    if "Od - Do" in df.columns:
+        # Absencna tabulka ma menej stlpcov
+        data = [[Paragraph(str(c), ParagraphStyle('H', parent=styles['Normal'], fontName=font_name, fontSize=8, alignment=1)) for c in df.columns]]
+        for _, row in df.iterrows():
+            row_data = []
+            for val in row.values:
+                row_data.append(Paragraph(str(val), cell_style))
+            data.append(row_data)
+        
+        # Sirky stlpcov pre absencie
+        col_widths = [150, 200, 200]
+        if len(df.columns) != 3: col_widths = None # fallback
+        
+        t = Table(data, colWidths=col_widths)
+        style = TableStyle([
+            ('GRID', (0,0), (-1,-1), 0.5, colors.black),
+            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+            ('BACKGROUND', (0,0), (-1,0), colors.lightgrey)
+        ])
+        t.setStyle(style)
+        
+        # Titulok bez datumu, kedze ten je v riadkoch
+        doc.build([Paragraph(f"{title_prefix}", styles['Title']), t])
+        
+    else:
+        # Klasicky rozpis
+        data = [[Paragraph(str(c), ParagraphStyle('H', parent=styles['Normal'], fontName=font_name, fontSize=8, alignment=1)) for c in df.columns]]
+        for _, row in df.iterrows():
+            row_data = []
+            is_motto = (row[0] == (motto or "Motto"))
+            for i, val in enumerate(row.values):
+                txt = str(val) if val else ""
+                if is_motto and i==0: 
+                    p = Paragraph(f"<para align='center'><b><i>{txt}</i></b></para>", ParagraphStyle('M', parent=cell_style, fontSize=9, padding=6, alignment=1))
+                elif is_motto: p = ""
+                elif i==0: p = Paragraph(f"<b>{txt}</b>", cell_style)
+                else: p = Paragraph(txt, cell_style)
+                row_data.append(p)
+            data.append(row_data)
+        
+        t = Table(data, colWidths=[130] + [135]*(len(df.columns)-1))
+        style = TableStyle([('GRID', (0,0), (-1,-1), 0.5, colors.black), ('VALIGN', (0,0), (-1,-1), 'MIDDLE'), ('BACKGROUND', (0,0), (-1,0), colors.grey)])
+        for i, row in enumerate(df.iterrows()):
+            if row[1][0] in ["Oddelenie", "Konziliárna amb", "RT ambulancie", "Chemo amb", "Disp. Ambulancia", "RTG Terapia"]:
+                style.add('BACKGROUND', (0, i+1), (-1, i+1), colors.lightgrey)
+            if row[1][0] == (motto or "Motto"):
+                style.add('SPAN', (0, i+1), (-1, i+1))
+                style.add('BACKGROUND', (0, i+1), (-1, i+1), colors.whitesmoke)
+                style.add('ALIGN', (0, i+1), (-1, i+1), 'CENTER')
+        t.setStyle(style)
+        
+        doc.build([Paragraph(f"{title_prefix} {df.columns[1]} - {df.columns[-1]}", styles['Title']), t])
+        
     buffer.seek(0)
     return buffer.getvalue()
 
@@ -720,10 +763,30 @@ if mode == "🚀 Generovať rozpis":
     if 'df_generated' in st.session_state:
         st.markdown("---")
         
+        # --- SEKCE PRE ABSENCIE ---
         if 'absences_df' in st.session_state and not st.session_state.absences_df.empty:
             with st.expander("📋 Prehľad neprítomností (Dovolenky, PN, Stáže)", expanded=True):
                 st.dataframe(st.session_state.absences_df, use_container_width=True, hide_index=True)
+                
+                # Samostatne odosielanie pre absencie
+                st.markdown("#### 📧 Odoslať zoznam absencií emailom")
+                c_a1, c_a2 = st.columns([3, 1])
+                email_abs = st.session_state.config.get('email_settings_absences', {})
+                to_abs = c_a1.text_input("Komu (Absencie):", email_abs.get('default_to', ''), key="to_abs")
+                
+                if c_a2.button("Odoslať Absencie"):
+                    # Generovanie PDF pre absencie
+                    pdf_abs = create_pdf_report(st.session_state.absences_df, None, title_prefix="Prehľad neprítomností")
+                    fn_abs = f"Nepritomnosti_{start_d.strftime('%d.%m.')}.pdf"
+                    subj_abs = email_abs.get('default_subject', "Nepritomnosti")
+                    body_abs = email_abs.get('default_body', "V prilohe.")
+                    
+                    if send_email_with_pdf(pdf_abs, fn_abs, to_abs, subj_abs, body_abs):
+                        st.success(f"Absencie odoslané na {to_abs}")
+                    else:
+                        st.error("Chyba pri odosielaní absencií")
 
+        # --- SEKCE PRE HLAVNY ROZPIS ---
         st.info("✏️ Tabuľku nižšie môžete priamo editovať. Zmeny sa prejavia v exportoch.")
         
         edited_df = st.data_editor(
@@ -777,11 +840,14 @@ if mode == "🚀 Generovať rozpis":
         c1.download_button("⬇️ XLSX", xlsx, f"{fn}.xlsx")
         c2.download_button("⬇️ PDF", pdf, f"{fn}.pdf", mime="application/pdf")
         
-        with st.expander("📧 Email"):
-            to = st.text_input("Komu:", st.session_state.config['email_settings']['default_to'])
-            if st.button("Odoslať"):
+        # Samostatne odosielanie pre hlavny rozpis
+        with st.expander("📧 Email - Hlavný rozpis"):
+            to = st.text_input("Komu (Rozpis):", st.session_state.config['email_settings']['default_to'])
+            if st.button("Odoslať Rozpis"):
                 if send_email_with_pdf(pdf, f"{fn}.pdf", to, st.session_state.config['email_settings']['default_subject'], st.session_state.config['email_settings']['default_body']):
-                    st.success("Odoslané")
+                    st.success(f"Rozpis odoslaný na {to}")
+                else:
+                     st.error("Chyba pri odosielaní rozpisu")
 
 elif mode == "⚙️ Nastavenia lekárov":
     st.header("Lekári")
@@ -811,11 +877,24 @@ elif mode == "🏥 Nastavenia ambulancií":
             save_config(st.session_state.config)
 
 elif mode == "📧 Nastavenia Emailu":
-    st.header("Email")
+    st.header("📧 Nastavenia Emailu")
+    
+    st.subheader("1. Hlavný rozpis služieb")
     c = st.session_state.config['email_settings']
-    t = st.text_input("To:", c.get('default_to', ''))
-    s = st.text_input("Subject:", c.get('default_subject', ''))
-    b = st.text_area("Body:", c.get('default_body', ''))
-    if st.button("Uložiť"):
+    t = st.text_input("Predvolený príjemca (Rozpis):", c.get('default_to', ''))
+    s = st.text_input("Predmet (Rozpis):", c.get('default_subject', ''))
+    b = st.text_area("Text (Rozpis):", c.get('default_body', ''))
+    
+    st.markdown("---")
+    
+    st.subheader("2. Prehľad neprítomností")
+    c_abs = st.session_state.config.get('email_settings_absences', {})
+    t_abs = st.text_input("Predvolený príjemca (Absencie):", c_abs.get('default_to', ''))
+    s_abs = st.text_input("Predmet (Absencie):", c_abs.get('default_subject', ''))
+    b_abs = st.text_area("Text (Absencie):", c_abs.get('default_body', ''))
+
+    if st.button("💾 Uložiť všetky nastavenia emailu"):
         st.session_state.config['email_settings'] = {"default_to": t, "default_subject": s, "default_body": b}
+        st.session_state.config['email_settings_absences'] = {"default_to": t_abs, "default_subject": s_abs, "default_body": b_abs}
         save_config(st.session_state.config)
+        st.success("Nastavenia uložené")
