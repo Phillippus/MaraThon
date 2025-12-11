@@ -30,8 +30,8 @@ import urllib.request
 CONFIG_FILE = 'hospital_config.json'
 HISTORY_FILE = 'room_history.json'
 PRIVATE_CALENDAR_URL = "https://calendar.google.com/calendar/ical/fntnonk%40gmail.com/private-e8ce4e0639a626387fff827edd26b87f/basic.ics"
-GIST_FILENAME_CONFIG = "hospital_config_v19.json"
-GIST_FILENAME_HISTORY = "room_history_v19.json"
+GIST_FILENAME_CONFIG = "hospital_config_v23.json"
+GIST_FILENAME_HISTORY = "room_history_v23.json"
 
 ROOMS_LIST = [
     (1, 3), (2, 3), (3, 3), (4, 3), (5, 3),
@@ -307,16 +307,26 @@ def get_ical_events(start_date, end_date):
     except: return {}
 
 def build_absence_table(absences, start_d):
-    data = []
-    end_d = start_d + timedelta(days=7)
-    for i in range((end_d - start_d).days + 1):
-        d = start_d + timedelta(days=i)
+    # Generujeme zoznam všetkých dní v rozmedzí (7 dní)
+    date_list = [start_d + timedelta(days=i) for i in range(8)]
+    
+    rows = []
+    for d in date_list:
         d_key = d.strftime('%Y-%m-%d')
+        # Ak pre daný deň existujú nejaké absencie
         if d_key in absences:
-            for name, typ in absences[d_key].items():
-                 data.append({"Dátum": d.strftime('%d.%m.%Y'), "Lekár": name, "Dôvod": typ})
-    if 
-        return pd.DataFrame(data).sort_values(by=["Dátum", "Lekár"])
+            # Prejdeme všetkých ľudí, čo v ten deň chýbajú
+            for person, reason in absences[d_key].items():
+                rows.append({
+                    "Dátum": d.strftime('%d.%m.%Y'),
+                    "Lekár": person,
+                    "Dôvod": reason
+                })
+    
+    # Ak sme našli nejaké záznamy, vrátime ich ako DataFrame, inak prázdny DF
+    if rows:
+        return pd.DataFrame(rows).sort_values(by=["Dátum", "Lekár"])
+    
     return pd.DataFrame(columns=["Dátum", "Lekár", "Dôvod"])
 
 def generate_data_structure(config, absences, start_date, save_hist=True):
@@ -649,7 +659,6 @@ if mode == "🚀 Generovať rozpis":
         with st.spinner("..."):
             end_d = start_d + timedelta(days=14)
             ab = get_ical_events(datetime.combine(start_d, datetime.min.time()), datetime.combine(end_d, datetime.min.time()))
-            # Generovanie a uloženie pomocných dát
             ds, g, d, di, raw_dates = generate_data_structure(st.session_state.config, ab, start_d)
             st.session_state.dates_raw = raw_dates
             st.session_state.df_generated = create_display_df(ds, g, d, di, st.session_state.motto, st.session_state.config)
@@ -679,7 +688,6 @@ if mode == "🚀 Generovať rozpis":
 
         st.info("✏️ Tabuľku nižšie môžete priamo editovať. Zmeny sa prejavia v exportoch.")
         
-        # Interaktívna editácia
         edited_df = st.data_editor(
             st.session_state.df_generated,
             use_container_width=True,
@@ -687,31 +695,23 @@ if mode == "🚀 Generovať rozpis":
             key="final_editor"
         )
         
-        # Tlačidlo pre uloženie manuálnych zmien do histórie (kontinuity)
         if 'dates_raw' in st.session_state:
              if st.button("💾 Uložiť aktuálne rozdelenie izieb do histórie (kontinuita)"):
                 try:
                     history = load_history()
-                    # Prechádzame stĺpce (dni)
-                    # edited_df má prvý stĺpec "Sekcia / Dátum", ostatné sú dátumy
                     cols = edited_df.columns
                     for i, date_key in enumerate(st.session_state.dates_raw):
-                        col_idx = i + 1  # preskočíme prvý stĺpec
+                        col_idx = i + 1
                         if col_idx >= len(cols): break
                         
                         col_name = cols[col_idx]
                         day_map = {}
                         
-                        # Prechádzame riadky
                         for idx, row in edited_df.iterrows():
                             label = str(row[cols[0]])
-                            # Hľadáme riadky lekárov (začínajú "Dr ")
                             if label.startswith("Dr "):
-                                doc_name = label.replace("Dr ", "").split(" ")[0].strip() # Orezanie "⚠ len..."
+                                doc_name = label.replace("Dr ", "").split(" ")[0].strip()
                                 cell_val = str(row[col_name])
-                                
-                                # Extrakcia čísiel izieb (pred prvým +)
-                                # Napr: "3, 4 + RT oddelenie" -> "3, 4" -> [3, 4]
                                 room_part = cell_val.split('+')[0]
                                 nums = []
                                 for piece in room_part.split(','):
@@ -722,7 +722,6 @@ if mode == "🚀 Generovať rozpis":
                                 if nums:
                                     day_map[doc_name] = nums
                         
-                        # Uloženie mapy pre daný deň
                         if day_map:
                             history[date_key] = day_map
                     
@@ -731,10 +730,7 @@ if mode == "🚀 Generovať rozpis":
                 except Exception as e:
                     st.error(f"Chyba pri ukladaní: {e}")
 
-        # Exporty používajú "edited_df"
         export_df = edited_df.copy()
-        
-        # Vytvorenie exportov
         xlsx = create_excel_report(export_df)
         pdf = create_pdf_report(export_df, st.session_state.motto)
         
