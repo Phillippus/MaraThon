@@ -30,8 +30,8 @@ import urllib.request
 CONFIG_FILE = 'hospital_config.json'
 HISTORY_FILE = 'room_history.json'
 PRIVATE_CALENDAR_URL = "https://calendar.google.com/calendar/ical/fntnonk%40gmail.com/private-e8ce4e0639a626387fff827edd26b87f/basic.ics"
-GIST_FILENAME_CONFIG = "hospital_config_v17.json"
-GIST_FILENAME_HISTORY = "room_history_v17.json"
+GIST_FILENAME_CONFIG = "hospital_config_v18.json"
+GIST_FILENAME_HISTORY = "room_history_v18.json"
 
 ROOMS_LIST = [
     (1, 3), (2, 3), (3, 3), (4, 3), (5, 3),
@@ -437,7 +437,7 @@ def scan_future_problems(config, weeks_ahead=12):
 def create_display_df(dates, data_grid, all_doctors, doctors_info, motto, config):
     rows = []
     ward_doctors = [d for d in all_doctors if "Oddelenie" in config['lekari'][d].get('moze', [])]
-    display_map = { "Radio 2A": "Radio 2A", "Konziliarna": "Konziliárna amb.", "Velka dispenzarna": "velký dispenzár", "Mala dispenzarna": "malý dispenzár" }
+    display_map = { "Radio 2A": "Radio 2A", "Konziliarna": "Konziliárna amb.", "Velka dispenzarna": "veľký dispenzár", "Mala dispenzarna": "malý dispenzár" }
     
     rows.append(["Oddelenie"] + dates)
     for doc in ward_doctors:
@@ -497,7 +497,6 @@ def create_pdf_report(df, motto):
         for i, val in enumerate(row.values):
             txt = str(val) if val else ""
             if is_motto and i==0: 
-                # Motto centered across all columns
                 p = Paragraph(f"<para align='center'><b><i>{txt}</i></b></para>", ParagraphStyle('M', parent=cell_style, fontSize=9, padding=6, alignment=1))
             elif is_motto: p = ""
             elif i==0: p = Paragraph(f"<b>{txt}</b>", cell_style)
@@ -632,8 +631,8 @@ if mode == "🚀 Generovať rozpis":
             end_d = start_d + timedelta(days=14)
             ab = get_ical_events(datetime.combine(start_d, datetime.min.time()), datetime.combine(end_d, datetime.min.time()))
             ds, g, d, di = generate_data_structure(st.session_state.config, ab, start_d)
-            st.session_state.df_display = create_display_df(ds, g, d, di, st.session_state.motto, st.session_state.config)
-            st.session_state.df_display.columns = ["Sekcia / Dátum"] + ds
+            st.session_state.df_generated = create_display_df(ds, g, d, di, st.session_state.motto, st.session_state.config)
+            st.session_state.df_generated.columns = ["Sekcia / Dátum"] + ds
         st.success("Hotovo!")
     
     if scan_clicked:
@@ -649,13 +648,31 @@ if mode == "🚀 Generovať rozpis":
         save_history({})
         st.success("História zmazaná")
 
-    if 'df_display' in st.session_state:
+    if 'df_generated' in st.session_state:
         st.markdown("---")
-        df = st.session_state.df_display.copy()
-        df.iloc[0, 1:] = df.columns[1:]
-        xlsx = create_excel_report(df)
-        pdf = create_pdf_report(df, st.session_state.motto)
-        fn = f"Rozpis_{df.columns[1]}_{df.columns[-1]}"
+        st.info("✏️ Tabuľku môžete priamo editovať. Zmeny sa prejavia v exportoch nižšie.")
+        
+        # Interaktívna editácia
+        edited_df = st.data_editor(
+            st.session_state.df_generated,
+            use_container_width=True,
+            hide_index=True,
+            key="final_editor"
+        )
+        
+        # Exporty používajú "edited_df", nie pôvodný "df_generated"
+        export_df = edited_df.copy()
+        # Oprava headerov pre export (prvý riadok v DF sú stĺpce, ale v exporte chceme čisté dáta)
+        # create_excel_report očakáva, že prvý riadok dát je header, ale data_editor má header v .columns
+        # Upravíme export_df tak, aby sedel formát pre create_excel_report
+        # V predchádzajúcej verzii sme robili: df.iloc[0, 1:] = df.columns[1:] - to tu už netreba, lebo editor má správne stĺpce
+        # Ale create_excel_report očakáva špecifickú štruktúru.
+        
+        # Vytvorenie exportov
+        xlsx = create_excel_report(export_df)
+        pdf = create_pdf_report(export_df, st.session_state.motto)
+        
+        fn = f"Rozpis_{export_df.columns[1]}_{export_df.columns[-1]}"
         c1, c2 = st.columns(2)
         c1.download_button("⬇️ XLSX", xlsx, f"{fn}.xlsx")
         c2.download_button("⬇️ PDF", pdf, f"{fn}.pdf", mime="application/pdf")
@@ -665,8 +682,6 @@ if mode == "🚀 Generovať rozpis":
             if st.button("Odoslať"):
                 if send_email_with_pdf(pdf, f"{fn}.pdf", to, st.session_state.config['email_settings']['default_subject'], st.session_state.config['email_settings']['default_body']):
                     st.success("Odoslané")
-        
-        st.dataframe(st.session_state.df_display, use_container_width=True, hide_index=True)
 
 elif mode == "⚙️ Nastavenia lekárov":
     st.header("Lekári")
