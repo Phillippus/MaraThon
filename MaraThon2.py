@@ -30,8 +30,8 @@ import urllib.request
 CONFIG_FILE = 'hospital_config.json'
 HISTORY_FILE = 'room_history.json'
 PRIVATE_CALENDAR_URL = "https://calendar.google.com/calendar/ical/fntnonk%40gmail.com/private-e8ce4e0639a626387fff827edd26b87f/basic.ics"
-GIST_FILENAME_CONFIG = "hospital_config_v23.json"
-GIST_FILENAME_HISTORY = "room_history_v23.json"
+GIST_FILENAME_CONFIG = "hospital_config_v24.json"
+GIST_FILENAME_HISTORY = "room_history_v24.json"
 
 ROOMS_LIST = [
     (1, 3), (2, 3), (3, 3), (4, 3), (5, 3),
@@ -307,27 +307,76 @@ def get_ical_events(start_date, end_date):
     except: return {}
 
 def build_absence_table(absences, start_d):
-    # Generujeme zoznam všetkých dní v rozmedzí (7 dní)
-    date_list = [start_d + timedelta(days=i) for i in range(8)]
+    # Zbiera surove data pre vsetky dni (aj mimo zoznamu, ak su v absences dict)
+    # Ale chceme zobrazit len relevantne pre tento tyzden (start_d -> +7 dni)
+    date_range_start = start_d.date()
+    date_range_end = (start_d + timedelta(days=7)).date()
     
-    rows = []
-    for d in date_list:
-        d_key = d.strftime('%Y-%m-%d')
-        # Ak pre daný deň existujú nejaké absencie
-        if d_key in absences:
-            # Prejdeme všetkých ľudí, čo v ten deň chýbajú
-            for person, reason in absences[d_key].items():
-                rows.append({
-                    "Dátum": d.strftime('%d.%m.%Y'),
-                    "Lekár": person,
-                    "Dôvod": reason
+    # 1. Extrahujeme vsetky zaznamy do zoznamu (datum, lekar, dovod)
+    raw_entries = []
+    # Prechadzame vsetky kluce v absences (co su datumy ako string YYYY-MM-DD)
+    # zoradene chronologicky pre istotu
+    for date_str in sorted(absences.keys()):
+        current_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+        # Zahrnieme len tie, ktore spadaju do nasho tyzdna (alebo chceme vsetky?)
+        # Zvycajne chceme len tie v aktualnom zobrazeni.
+        if date_range_start <= current_date <= date_range_end:
+            for person, reason in absences[date_str].items():
+                raw_entries.append({
+                    "date": current_date,
+                    "person": person,
+                    "reason": reason
                 })
     
-    # Ak sme našli nejaké záznamy, vrátime ich ako DataFrame, inak prázdny DF
-    if rows:
-        return pd.DataFrame(rows).sort_values(by=["Dátum", "Lekár"])
+    if not raw_entries:
+        return pd.DataFrame(columns=["Od - Do", "Lekár", "Dôvod"])
+
+    # 2. Zoskupujeme
+    # Najprv zoradit podla lekara, dovodu a datumu
+    raw_entries.sort(key=lambda x: (x['person'], x['reason'], x['date']))
     
-    return pd.DataFrame(columns=["Dátum", "Lekár", "Dôvod"])
+    grouped_rows = []
+    if not raw_entries:
+        return pd.DataFrame(columns=["Od - Do", "Lekár", "Dôvod"])
+
+    # Inicializacia prveho intervalu
+    current_person = raw_entries[0]['person']
+    current_reason = raw_entries[0]['reason']
+    start_date = raw_entries[0]['date']
+    last_date = raw_entries[0]['date']
+
+    for entry in raw_entries[1:]:
+        # Ak je to ten isty clovek, ten isty dovod a datum nasleduje hned po predchadzajucom (rozdiel 1 den)
+        is_consecutive = (entry['date'] - last_date).days == 1
+        is_same_group = (entry['person'] == current_person and entry['reason'] == current_reason)
+        
+        if is_same_group and is_consecutive:
+            # Predlzujeme interval
+            last_date = entry['date']
+        else:
+            # Uzavrieme predchadzajuci interval a zacneme novy
+            date_str = f"{start_date.strftime('%d.%m.')} - {last_date.strftime('%d.%m.%Y')}" if start_date != last_date else f"{start_date.strftime('%d.%m.%Y')}"
+            grouped_rows.append({
+                "Od - Do": date_str,
+                "Lekár": current_person,
+                "Dôvod": current_reason
+            })
+            
+            # Reset
+            current_person = entry['person']
+            current_reason = entry['reason']
+            start_date = entry['date']
+            last_date = entry['date']
+
+    # Pridat posledny interval
+    date_str = f"{start_date.strftime('%d.%m.')} - {last_date.strftime('%d.%m.%Y')}" if start_date != last_date else f"{start_date.strftime('%d.%m.%Y')}"
+    grouped_rows.append({
+        "Od - Do": date_str,
+        "Lekár": current_person,
+        "Dôvod": current_reason
+    })
+
+    return pd.DataFrame(grouped_rows)
 
 def generate_data_structure(config, absences, start_date, save_hist=True):
     days_map = {0: "Pondelok", 1: "Utorok", 2: "Streda", 3: "Stvrtok", 4: "Piatok"}
