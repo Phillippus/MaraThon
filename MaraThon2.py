@@ -835,7 +835,9 @@ def send_email_with_pdf(pdf_bytes, filename, to_email, subject, body):
         return False, "Nie je zadaný príjemca emailu."
     try:
         sender = st.secrets["email"]["username"]
-        password = st.secrets["email"]["password"]
+        # Gmail app passwords are often shown with spaces for readability.
+        # Normalize to 16 contiguous characters before SMTP login.
+        password = str(st.secrets["email"]["password"]).replace(" ", "").strip()
         msg = MIMEMultipart()
         msg['From'], msg['To'], msg['Subject'] = sender, to_email, subject
         msg.attach(MIMEText(body, 'plain'))
