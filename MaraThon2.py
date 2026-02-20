@@ -312,18 +312,21 @@ def parse_manual_day_preferences(day_pref):
     manual_rooms = {}
     manual_max_patients = {}
     locked_rooms = {}
+    force_ward = {}
     if not isinstance(day_pref, dict):
-        return manual_rooms, manual_max_patients, locked_rooms
+        return manual_rooms, manual_max_patients, locked_rooms, force_ward
 
     for doc, val in day_pref.items():
         if isinstance(val, dict):
             rooms = val.get("rooms", [])
             max_patients = val.get("max_patients", None)
             locked = bool(val.get("locked_rooms", False))
+            force_to_ward = bool(val.get("force_to_ward", False))
         else:
             rooms = val
             max_patients = None
             locked = False
+            force_to_ward = False
 
         if not isinstance(rooms, list):
             rooms = []
@@ -336,8 +339,9 @@ def parse_manual_day_preferences(day_pref):
             except:
                 pass
         locked_rooms[doc] = locked
+        force_ward[doc] = force_to_ward
 
-    return manual_rooms, manual_max_patients, locked_rooms
+    return manual_rooms, manual_max_patients, locked_rooms, force_ward
 
 def distribute_rooms(
     doctors_list,
@@ -370,15 +374,29 @@ def distribute_rooms(
     elif len(non_protected) >= 3:
         use_for_rooms = list(non_protected)
 
-    no_room_docs = [d for d in doctors_list if d not in use_for_rooms]
     if not use_for_rooms:
         use_for_rooms = list(doctors_list)
-        no_room_docs = []
 
     assignment = {d: [] for d in doctors_list}
     current_beds = {d: 0 for d in doctors_list}
     available_rooms = sorted(ROOMS_LIST, key=lambda x: x[0]) 
     hard_caps = {d: max(1, int(doctor_max_patients.get(d, 15))) for d in use_for_rooms}
+
+    # If caps on current ward doctors cannot hold all patients, add overflow
+    # first to Kurisova, then Kohutek (if they are available that day).
+    overflow_order = ["Kurisova", "Kohutek"]
+    while sum(hard_caps.get(d, 15) for d in use_for_rooms) < total_beds:
+        added = False
+        for overflow_doc in overflow_order:
+            if overflow_doc in doctors_list and overflow_doc not in use_for_rooms:
+                use_for_rooms.append(overflow_doc)
+                hard_caps[overflow_doc] = max(1, int(doctor_max_patients.get(overflow_doc, 15)))
+                added = True
+                break
+        if not added:
+            break
+
+    no_room_docs = [d for d in doctors_list if d not in use_for_rooms]
     locked_doctors = {d for d in use_for_rooms if locked_preferences.get(d, False)}
 
     # --- 1. TARGET CALCULATION (equal load, respect 15 where possible) ---
@@ -447,16 +465,24 @@ def distribute_rooms(
         rooms = sorted(assignment[doc], key=lambda x: x[0])
         result_raw[doc] = [r[0] for r in rooms]
         r_str = ", ".join([str(r[0]) for r in rooms])
+        is_wolf_note = bool(wolf_doc_name) and doc == wolf_doc_name and wolf_doc_name != "Spanik"
 
         if not rooms:
              if doc in no_room_docs and doc in ["Miklatkova", "Kohutek", "Kurisova"]:
-                 result_text[doc] = "RT oddelenie"
+                 base_txt = "RT oddelenie"
              elif doc == wolf_doc_name:
-                 result_text[doc] = "Wolf (0L)"
+                 base_txt = "Wolf (0L)"
              else:
-                 result_text[doc] = ""
+                 base_txt = ""
         else:
-             result_text[doc] = f"{r_str} + Wolf" if doc == wolf_doc_name else r_str
+             base_txt = r_str
+
+        if is_wolf_note and base_txt and "Wolf" not in base_txt:
+            result_text[doc] = f"{base_txt} + Wolf"
+        elif is_wolf_note and not base_txt:
+            result_text[doc] = "Wolf"
+        else:
+            result_text[doc] = base_txt
              
     return result_text, result_raw
 
@@ -572,6 +598,7 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
     closures = config.get('closures', {})
     
     dates_raw = []
+    start_key = start_date.strftime('%Y-%m-%d')
 
     for i in range(7):
         curr_date = thursday + timedelta(days=i)
@@ -584,6 +611,12 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
         day_absences = absences.get(date_key, {})
         closed_today = closures.get(date_key, [])
         data_grid[date_str] = {}
+
+        daily_pref = manual_all.get(date_key, {})
+        if not daily_pref:
+            daily_pref = manual_all.get(start_key, {})
+        manual_rooms, manual_max_patients, locked_rooms, force_ward = parse_manual_day_preferences(daily_pref)
+        forced_ward_docs = {doc for doc, forced in force_ward.items() if forced and doc in all_doctors}
         
         available = [
             d for d in all_doctors
@@ -594,6 +627,8 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
         assigned_amb = {}
         
         for doc in list(available):
+            if doc in forced_ward_docs:
+                continue
             if fixed := config['lekari'][doc].get('pevne_dni', {}).get(day_name):
                 for t in [t.strip() for t in fixed.split(',')]:
                     if t in closed_today: assigned_amb[t] = "ZATVORENÉ"
@@ -614,7 +649,12 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
                 continue
             prio = config['ambulancie'][amb_name]['priority']
             if isinstance(prio, dict): prio = prio.get(str(curr_date.weekday()), prio.get('default', []))
-            cands = [d for d in prio if d in available and amb_name in config['lekari'][d].get('moze', [])]
+            cands = [
+                d for d in prio
+                if d in available
+                and d not in forced_ward_docs
+                and amb_name in config['lekari'][d].get('moze', [])
+            ]
             amb_scarcity.append({"name": amb_name, "candidates": cands, "count": len(cands), "idx": ambs_to_process.index(amb_name)})
         
         amb_scarcity.sort(key=lambda x: (x['count'], x['idx']))
@@ -658,13 +698,10 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
             ward_cands = [d for d in available if "Oddelenie" in config['lekari'][d].get('moze', [])]
             if wolf_doc and wolf_doc not in ward_cands and "Oddelenie" in config['lekari'].get(wolf_doc, {}).get('moze', []):
                 ward_cands.append(wolf_doc)
+            for forced_doc in forced_ward_docs:
+                if forced_doc in available and "Oddelenie" in config['lekari'].get(forced_doc, {}).get('moze', []) and forced_doc not in ward_cands:
+                    ward_cands.append(forced_doc)
             
-            daily_pref = manual_all.get(date_key, {})
-            if not daily_pref:
-                start_key = start_date.strftime('%Y-%m-%d')
-                daily_pref = manual_all.get(start_key, {})
-
-            manual_rooms, manual_max_patients, locked_rooms = parse_manual_day_preferences(daily_pref)
             room_text_map, room_raw_map = distribute_rooms(
                 ward_cands,
                 wolf_doc,
@@ -950,6 +987,7 @@ if mode == "🚀 Generovať rozpis":
                         st.session_state[f"core_{doc}"] = ", ".join(str(x) for x in room_nums)
                         st.session_state[f"core_max_{doc}"] = 15
                         st.session_state[f"core_lock_{doc}"] = False
+                        st.session_state[f"core_force_ward_{doc}"] = False
             if loaded_manual:
                 st.session_state.manual_core[start_d.strftime('%Y-%m-%d')] = loaded_manual
                 st.success(f"Načítané izby z posledného dňa predošlého cyklu ({prev_cycle_last_day_key}).")
@@ -967,10 +1005,12 @@ if mode == "🚀 Generovať rozpis":
                 default_rooms = doc_manual.get("rooms", [])
                 default_max = int(doc_manual.get("max_patients", 15) or 15)
                 default_lock = bool(doc_manual.get("locked_rooms", False))
+                default_force = bool(doc_manual.get("force_to_ward", False))
             else:
                 default_rooms = doc_manual if isinstance(doc_manual, list) else []
                 default_max = 15
                 default_lock = False
+                default_force = False
 
             if f"core_{doc}" not in st.session_state and default_rooms:
                 st.session_state[f"core_{doc}"] = ", ".join(str(x) for x in default_rooms)
@@ -978,6 +1018,8 @@ if mode == "🚀 Generovať rozpis":
                 st.session_state[f"core_max_{doc}"] = default_max
             if f"core_lock_{doc}" not in st.session_state:
                 st.session_state[f"core_lock_{doc}"] = default_lock
+            if f"core_force_ward_{doc}" not in st.session_state:
+                st.session_state[f"core_force_ward_{doc}"] = default_force
 
             c_rooms, c_max = st.columns(2)
             val = c_rooms.text_input(f"Dr {doc} – izby (napr. 1, 4):", key=f"core_{doc}")
@@ -989,13 +1031,24 @@ if mode == "🚀 Generovať rozpis":
                 key=f"core_max_{doc}"
             )
             lock_rooms = st.checkbox(f"Dr {doc} – Zamknúť pridelené izby", key=f"core_lock_{doc}")
+            force_ward = st.checkbox(f"Dr {doc} – Prideliť na oddelenie", key=f"core_force_ward_{doc}")
             if val.strip():
                 try:
                     parsed_rooms = [int(p.strip()) for p in val.split(',') if p.strip().isdigit()]
-                    manual_core_input[doc] = {"rooms": parsed_rooms, "max_patients": int(max_pat), "locked_rooms": bool(lock_rooms)}
+                    manual_core_input[doc] = {
+                        "rooms": parsed_rooms,
+                        "max_patients": int(max_pat),
+                        "locked_rooms": bool(lock_rooms),
+                        "force_to_ward": bool(force_ward)
+                    }
                 except: pass
-            elif int(max_pat) != 15 or bool(lock_rooms):
-                manual_core_input[doc] = {"rooms": [], "max_patients": int(max_pat), "locked_rooms": bool(lock_rooms)}
+            elif int(max_pat) != 15 or bool(lock_rooms) or bool(force_ward):
+                manual_core_input[doc] = {
+                    "rooms": [],
+                    "max_patients": int(max_pat),
+                    "locked_rooms": bool(lock_rooms),
+                    "force_to_ward": bool(force_ward)
+                }
     
     if manual_core_input:
         st.session_state.manual_core[start_d.strftime('%Y-%m-%d')] = manual_core_input
