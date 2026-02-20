@@ -379,6 +379,7 @@ def distribute_rooms(
     current_beds = {d: 0 for d in doctors_list}
     available_rooms = sorted(ROOMS_LIST, key=lambda x: x[0]) 
     hard_caps = {d: max(1, int(doctor_max_patients.get(d, 15))) for d in use_for_rooms}
+    locked_doctors = {d for d in use_for_rooms if locked_preferences.get(d, False)}
 
     # --- 1. TARGET CALCULATION (equal load, respect 15 where possible) ---
     targets = {d: 0 for d in doctors_list}
@@ -405,6 +406,8 @@ def distribute_rooms(
     # --- 3. KONTINUITA (PREVIOUS) ---
     if previous_assignments:
         for doc in use_for_rooms:
+            if doc in locked_doctors:
+                continue
             if doc in previous_assignments:
                 my_prev = []
                 for r_id in previous_assignments[doc]:
@@ -420,12 +423,15 @@ def distribute_rooms(
 
     # --- 4. DOROVNÁVANIE ---
     while available_rooms:
-        candidates = [d for d in use_for_rooms if current_beds[d] < targets.get(d, 15) and current_beds[d] < hard_caps.get(d, 15)]
+        unlocked = [d for d in use_for_rooms if d not in locked_doctors]
+        if not unlocked:
+            unlocked = list(use_for_rooms)
+        candidates = [d for d in unlocked if current_beds[d] < targets.get(d, 15) and current_beds[d] < hard_caps.get(d, 15)]
         if not candidates:
             # If caps are impossible to satisfy globally, finish assignment anyway.
-            candidates = [d for d in use_for_rooms if current_beds[d] < targets.get(d, 15)]
+            candidates = [d for d in unlocked if current_beds[d] < targets.get(d, 15)]
         if not candidates:
-            candidates = list(use_for_rooms)
+            candidates = list(unlocked)
         candidates.sort(key=lambda d: (current_beds[d], doctor_priorities.get(d, 100), d))
         receiver = candidates[0]
         best_room = available_rooms[0]
@@ -971,8 +977,9 @@ if mode == "🚀 Generovať rozpis":
             if f"core_lock_{doc}" not in st.session_state:
                 st.session_state[f"core_lock_{doc}"] = default_lock
 
-            val = st.text_input(f"Dr {doc} – izby (napr. 1, 4):", key=f"core_{doc}")
-            max_pat = st.number_input(
+            c_rooms, c_max = st.columns(2)
+            val = c_rooms.text_input(f"Dr {doc} – izby (napr. 1, 4):", key=f"core_{doc}")
+            max_pat = c_max.number_input(
                 f"Dr {doc} – maximum pacientov:",
                 min_value=1,
                 max_value=42,
