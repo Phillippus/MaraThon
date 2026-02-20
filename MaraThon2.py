@@ -874,6 +874,29 @@ if mode == "🚀 Generovať rozpis":
         if "Oddelenie" in p.get("moze", [])
         and (p.get("active", True) or p.get("short_term_active", False))
     ]
+
+    if st.button("📥 Načítať izby z minulého týždňa"):
+        curr_week_start = start_d + timedelta(days=(3 - start_d.weekday()) % 7)
+        prev_week_key = (curr_week_start - timedelta(days=7)).strftime('%Y-%m-%d')
+        history_for_load = load_history()
+        prev_rooms = history_for_load.get(prev_week_key, {})
+        if prev_rooms:
+            loaded_manual = {}
+            for doc in ward_docs:
+                rooms = prev_rooms.get(doc, [])
+                if rooms:
+                    room_nums = [int(x) for x in rooms if isinstance(x, int) or (isinstance(x, str) and str(x).isdigit())]
+                    if room_nums:
+                        loaded_manual[doc] = room_nums
+                        st.session_state[f"core_{doc}"] = ", ".join(str(x) for x in room_nums)
+            if loaded_manual:
+                st.session_state.manual_core[start_d.strftime('%Y-%m-%d')] = loaded_manual
+                st.success(f"Načítané izby z dátumu {prev_week_key}.")
+            else:
+                st.warning(f"V histórii ({prev_week_key}) neboli nájdené izby pre aktívnych lekárov oddelenia.")
+        else:
+            st.warning(f"V histórii nie je záznam pre {prev_week_key}.")
+
     cols = st.columns(2)
     for i, doc in enumerate(ward_docs):
         with cols[i % 2]:
