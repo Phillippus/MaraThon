@@ -363,11 +363,14 @@ def distribute_rooms(
     total_beds = sum(r[1] for r in ROOMS_LIST)
     min_docs_for_limit = math.ceil(total_beds / 15)
     protected = ["Miklatkova", "Kohutek", "Kurisova"]
-    non_protected = [d for d in doctors_list if d not in protected]
+    overflow_order = ["Kurisova", "Kohutek", "Martinka"]
+    overflow_only_when_capped = set(overflow_order) if custom_cap_docs else set()
+    non_protected = [d for d in doctors_list if d not in protected and d not in overflow_only_when_capped]
     use_for_rooms = list(non_protected)
+    fallback_order = overflow_order + ["Miklatkova"] if custom_cap_docs else protected
 
     if len(non_protected) < min_docs_for_limit:
-        for fallback_doc in protected:
+        for fallback_doc in fallback_order:
             if fallback_doc in doctors_list and fallback_doc not in use_for_rooms:
                 use_for_rooms.append(fallback_doc)
             if len(use_for_rooms) >= min_docs_for_limit:
@@ -385,8 +388,7 @@ def distribute_rooms(
     hard_caps = {d: max(1, int(doctor_max_patients.get(d, 15))) for d in use_for_rooms}
 
     # If caps on current ward doctors cannot hold all patients, add overflow
-    # first to Kurisova, then Kohutek (if they are available that day).
-    overflow_order = ["Kurisova", "Kohutek"]
+    # first to Kurisova, then Kohutek, then Martinka (if available that day).
     while sum(hard_caps.get(d, 15) for d in use_for_rooms) < total_beds:
         added = False
         for overflow_doc in overflow_order:
