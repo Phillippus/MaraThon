@@ -358,6 +358,7 @@ def distribute_rooms(
     if doctor_priorities is None: doctor_priorities = {}
     if doctor_max_patients is None: doctor_max_patients = {}
     if locked_preferences is None: locked_preferences = {}
+    custom_cap_docs = set(doctor_max_patients.keys())
 
     total_beds = sum(r[1] for r in ROOMS_LIST)
     min_docs_for_limit = math.ceil(total_beds / 15)
@@ -377,6 +378,7 @@ def distribute_rooms(
     if not use_for_rooms:
         use_for_rooms = list(doctors_list)
 
+    initial_use_for_rooms = list(use_for_rooms)
     assignment = {d: [] for d in doctors_list}
     current_beds = {d: 0 for d in doctors_list}
     available_rooms = sorted(ROOMS_LIST, key=lambda x: x[0]) 
@@ -444,6 +446,13 @@ def distribute_rooms(
         unlocked = [d for d in use_for_rooms if d not in locked_doctors]
         if not unlocked:
             unlocked = list(use_for_rooms)
+
+        overflow_docs = [d for d in unlocked if d not in initial_use_for_rooms]
+        unlimited_base_docs = [d for d in initial_use_for_rooms if d in unlocked and d not in custom_cap_docs]
+        overflow_gate_open = (not unlimited_base_docs) or all(current_beds[d] >= 15 for d in unlimited_base_docs)
+        if not overflow_gate_open and overflow_docs:
+            unlocked = [d for d in unlocked if d not in overflow_docs]
+
         candidates = [d for d in unlocked if current_beds[d] < targets.get(d, 15) and current_beds[d] < hard_caps.get(d, 15)]
         if not candidates:
             # If caps are impossible to satisfy globally, finish assignment anyway.
