@@ -308,11 +308,52 @@ def remove_doctor_everywhere(config, history, manual_core, doctor_name):
         day_map.pop(doctor_name, None)
     return True, ""
 
-def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, manual_preferences=None, doctor_priorities=None):
+def parse_manual_day_preferences(day_pref):
+    manual_rooms = {}
+    manual_max_patients = {}
+    locked_rooms = {}
+    if not isinstance(day_pref, dict):
+        return manual_rooms, manual_max_patients, locked_rooms
+
+    for doc, val in day_pref.items():
+        if isinstance(val, dict):
+            rooms = val.get("rooms", [])
+            max_patients = val.get("max_patients", None)
+            locked = bool(val.get("locked_rooms", False))
+        else:
+            rooms = val
+            max_patients = None
+            locked = False
+
+        if not isinstance(rooms, list):
+            rooms = []
+        parsed_rooms = [int(x) for x in rooms if isinstance(x, int) or (isinstance(x, str) and str(x).isdigit())]
+        manual_rooms[doc] = parsed_rooms
+
+        if max_patients is not None:
+            try:
+                manual_max_patients[doc] = int(max_patients)
+            except:
+                pass
+        locked_rooms[doc] = locked
+
+    return manual_rooms, manual_max_patients, locked_rooms
+
+def distribute_rooms(
+    doctors_list,
+    wolf_doc_name,
+    previous_assignments=None,
+    manual_preferences=None,
+    doctor_priorities=None,
+    doctor_max_patients=None,
+    locked_preferences=None
+):
     if not doctors_list: return {}, {}
     if manual_preferences is None: manual_preferences = {}
     if previous_assignments is None: previous_assignments = {}
     if doctor_priorities is None: doctor_priorities = {}
+    if doctor_max_patients is None: doctor_max_patients = {}
+    if locked_preferences is None: locked_preferences = {}
 
     total_beds = sum(r[1] for r in ROOMS_LIST)
     min_docs_for_limit = math.ceil(total_beds / 15)
@@ -337,6 +378,7 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
     assignment = {d: [] for d in doctors_list}
     current_beds = {d: 0 for d in doctors_list}
     available_rooms = sorted(ROOMS_LIST, key=lambda x: x[0]) 
+    hard_caps = {d: max(1, int(doctor_max_patients.get(d, 15))) for d in use_for_rooms}
 
     # --- 1. TARGET CALCULATION (equal load, respect 15 where possible) ---
     targets = {d: 0 for d in doctors_list}
@@ -346,14 +388,16 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
     for i, doc in enumerate(ordered_for_target):
         targets[doc] = base + (1 if i < rem else 0)
 
-    # --- 2. PREFERENCIE (MANUAL) ---
+    # --- 2. PREFERENCIE (MANUAL + LOCKED) ---
     for doc, nums in manual_preferences.items():
         if doc not in use_for_rooms: continue
-        my_target = targets.get(doc, 15)
+        my_target = min(targets.get(doc, 15), hard_caps.get(doc, 15))
+        is_locked = bool(locked_preferences.get(doc, False))
         for num in nums:
             r_obj = next((r for r in available_rooms if r[0] == num), None)
             if not r_obj: continue
-            if current_beds[doc] + r_obj[1] <= my_target:
+            # Locked rooms are hard-respected, even if they exceed limits.
+            if is_locked or current_beds[doc] + r_obj[1] <= my_target:
                 assignment[doc].append(r_obj)
                 current_beds[doc] += r_obj[1]
                 available_rooms.remove(r_obj)
@@ -369,15 +413,19 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
                 my_target = targets.get(doc, 15)
                 random.shuffle(my_prev)
                 for r_obj in my_prev:
-                    if current_beds[doc] + r_obj[1] <= my_target:
+                    if current_beds[doc] + r_obj[1] <= min(my_target, hard_caps.get(doc, 15)):
                         assignment[doc].append(r_obj)
                         current_beds[doc] += r_obj[1]
                         available_rooms.remove(r_obj)
 
     # --- 4. DOROVNÁVANIE ---
     while available_rooms:
-        candidates = [d for d in use_for_rooms if current_beds[d] < targets.get(d, 15)]
-        if not candidates: candidates = list(use_for_rooms)
+        candidates = [d for d in use_for_rooms if current_beds[d] < targets.get(d, 15) and current_beds[d] < hard_caps.get(d, 15)]
+        if not candidates:
+            # If caps are impossible to satisfy globally, finish assignment anyway.
+            candidates = [d for d in use_for_rooms if current_beds[d] < targets.get(d, 15)]
+        if not candidates:
+            candidates = list(use_for_rooms)
         candidates.sort(key=lambda d: (current_beds[d], doctor_priorities.get(d, 100), d))
         receiver = candidates[0]
         best_room = available_rooms[0]
@@ -610,12 +658,15 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
                 start_key = start_date.strftime('%Y-%m-%d')
                 daily_pref = manual_all.get(start_key, {})
 
+            manual_rooms, manual_max_patients, locked_rooms = parse_manual_day_preferences(daily_pref)
             room_text_map, room_raw_map = distribute_rooms(
                 ward_cands,
                 wolf_doc,
                 last_day_assignments,
-                daily_pref,
-                doctor_priorities=doctor_priorities
+                manual_rooms,
+                doctor_priorities=doctor_priorities,
+                doctor_max_patients=manual_max_patients,
+                locked_preferences=locked_rooms
             )
             last_day_assignments = room_raw_map
             if save_hist: history[date_key] = room_raw_map
@@ -887,8 +938,10 @@ if mode == "🚀 Generovať rozpis":
                 if rooms:
                     room_nums = [int(x) for x in rooms if isinstance(x, int) or (isinstance(x, str) and str(x).isdigit())]
                     if room_nums:
-                        loaded_manual[doc] = room_nums
+                        loaded_manual[doc] = {"rooms": room_nums, "max_patients": 15, "locked_rooms": False}
                         st.session_state[f"core_{doc}"] = ", ".join(str(x) for x in room_nums)
+                        st.session_state[f"core_max_{doc}"] = 15
+                        st.session_state[f"core_lock_{doc}"] = False
             if loaded_manual:
                 st.session_state.manual_core[start_d.strftime('%Y-%m-%d')] = loaded_manual
                 st.success(f"Načítané izby z posledného dňa predošlého cyklu ({prev_cycle_last_day_key}).")
@@ -898,13 +951,42 @@ if mode == "🚀 Generovať rozpis":
             st.warning(f"V histórii nie je záznam pre posledný deň predošlého cyklu ({prev_cycle_last_day_key}).")
 
     cols = st.columns(2)
+    current_manual_day = st.session_state.manual_core.get(start_d.strftime('%Y-%m-%d'), {})
     for i, doc in enumerate(ward_docs):
         with cols[i % 2]:
+            doc_manual = current_manual_day.get(doc, {})
+            if isinstance(doc_manual, dict):
+                default_rooms = doc_manual.get("rooms", [])
+                default_max = int(doc_manual.get("max_patients", 15) or 15)
+                default_lock = bool(doc_manual.get("locked_rooms", False))
+            else:
+                default_rooms = doc_manual if isinstance(doc_manual, list) else []
+                default_max = 15
+                default_lock = False
+
+            if f"core_{doc}" not in st.session_state and default_rooms:
+                st.session_state[f"core_{doc}"] = ", ".join(str(x) for x in default_rooms)
+            if f"core_max_{doc}" not in st.session_state:
+                st.session_state[f"core_max_{doc}"] = default_max
+            if f"core_lock_{doc}" not in st.session_state:
+                st.session_state[f"core_lock_{doc}"] = default_lock
+
             val = st.text_input(f"Dr {doc} – izby (napr. 1, 4):", key=f"core_{doc}")
+            max_pat = st.number_input(
+                f"Dr {doc} – maximum pacientov:",
+                min_value=1,
+                max_value=42,
+                value=int(st.session_state[f"core_max_{doc}"]),
+                key=f"core_max_{doc}"
+            )
+            lock_rooms = st.checkbox(f"Dr {doc} – Zamknúť pridelené izby", key=f"core_lock_{doc}")
             if val.strip():
                 try:
-                    manual_core_input[doc] = [int(p.strip()) for p in val.split(',') if p.strip().isdigit()]
+                    parsed_rooms = [int(p.strip()) for p in val.split(',') if p.strip().isdigit()]
+                    manual_core_input[doc] = {"rooms": parsed_rooms, "max_patients": int(max_pat), "locked_rooms": bool(lock_rooms)}
                 except: pass
+            elif int(max_pat) != 15 or bool(lock_rooms):
+                manual_core_input[doc] = {"rooms": [], "max_patients": int(max_pat), "locked_rooms": bool(lock_rooms)}
     
     if manual_core_input:
         st.session_state.manual_core[start_d.strftime('%Y-%m-%d')] = manual_core_input
