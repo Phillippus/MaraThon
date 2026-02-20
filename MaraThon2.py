@@ -915,12 +915,13 @@ st.title("🏥 Rozpis prác - Onkologická klinika FN Trenčín")
 if 'config' not in st.session_state: st.session_state.config = load_config()
 if 'manual_core' not in st.session_state: st.session_state.manual_core = {}
 if 'temp_exceptions' not in st.session_state: st.session_state.temp_exceptions = []
+if 'motto' not in st.session_state: st.session_state.motto = ""
 
 mode = st.sidebar.radio("Navigácia", ["🚀 Generovať rozpis", "⚙️ Nastavenia lekárov", "🏥 Nastavenia ambulancií", "📧 Nastavenia Emailu"])
 
 if mode == "🚀 Generovať rozpis":
     c1, c2 = st.columns(2)
-    st.session_state.motto = c1.text_input("📢 Motto:", placeholder="...")
+    st.session_state.motto = c1.text_input("📢 Motto:", value=st.session_state.motto, placeholder="...")
     start_d = c2.date_input("Začiatok:", datetime.now())
 
     with st.expander("📅 Výnimky", expanded=True):
