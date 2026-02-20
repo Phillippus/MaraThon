@@ -43,22 +43,43 @@ ROOMS_LIST = [
 
 # --- REGISTER UNICODE FONT PRE PDF ---
 def setup_pdf_fonts():
-    font_dir = "/tmp"
     font_name = "DejaVuSans"
-    font_path = os.path.join(font_dir, f"{font_name}.ttf")
-    try:
-        if os.path.exists(font_path):
-            pdfmetrics.registerFont(TTFont(font_name, font_path))
-            return font_name
-    except: pass
-    
-    if not os.path.exists(font_path):
+    if font_name in pdfmetrics.getRegisteredFontNames():
+        return font_name
+
+    font_path_candidates = [
+        "/tmp/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/local/share/fonts/DejaVuSans.ttf",
+        "/Library/Fonts/Arial Unicode.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+    ]
+
+    for path in font_path_candidates:
+        if not os.path.exists(path):
+            continue
         try:
-            font_url = "https://raw.githubusercontent.com/dejavu-fonts/dejavu-fonts/master/ttf/DejaVuSans.ttf"
-            urllib.request.urlretrieve(font_url, font_path)
-            pdfmetrics.registerFont(TTFont(font_name, font_path))
+            pdfmetrics.registerFont(TTFont(font_name, path))
             return font_name
-        except: pass
+        except:
+            pass
+
+    download_target = "/tmp/DejaVuSans.ttf"
+    download_urls = [
+        "https://raw.githubusercontent.com/dejavu-fonts/dejavu-fonts/master/ttf/DejaVuSans.ttf",
+        "https://raw.githubusercontent.com/dejavu-fonts/dejavu-fonts/main/ttf/DejaVuSans.ttf",
+    ]
+    for font_url in download_urls:
+        try:
+            with urllib.request.urlopen(font_url, timeout=REQUEST_TIMEOUT_SECONDS) as resp:
+                content = resp.read()
+            with open(download_target, "wb") as f:
+                f.write(content)
+            pdfmetrics.registerFont(TTFont(font_name, download_target))
+            return font_name
+        except:
+            pass
     return "Helvetica"
 
 # --- GIST ULOŽISKO ---
@@ -131,6 +152,12 @@ def load_config():
         if 'priority' not in doctor_data:
             doctor_data['priority'] = 100
             changed = True
+        if 'short_term_active' not in doctor_data:
+            doctor_data['short_term_active'] = (not doctor_data.get('active', True)) and bool(doctor_data.get('extra_dni', []))
+            changed = True
+        if 'extra_dni' not in doctor_data:
+            doctor_data['extra_dni'] = []
+            changed = True
         
     if changed: save_config(config)
     return config
@@ -179,7 +206,7 @@ def get_default_config():
             "Miklatkova": { "moze": ["Oddelenie", "Wolf"], "active": True },
             "Kurisova": { "moze": ["Oddelenie", "Velka dispenzarna", "Mala dispenzarna", "Radio 2A", "Wolf"], "special": "veduca", "active": True },
             "Blahova": { "moze": ["Oddelenie", "Velka dispenzarna", "Mala dispenzarna", "Chemo 8B", "Chemo 8C"], "active": False },
-            "Hrabosova": { "moze": ["Oddelenie", "Velka dispenzarna", "Mala dispenzarna"], "active": False, "extra_dni": [] },
+            "Hrabosova": { "moze": ["Oddelenie", "Velka dispenzarna", "Mala dispenzarna"], "active": False, "short_term_active": True, "extra_dni": [] },
             "Bocak": { "moze": ["Velka dispenzarna"], "pevne_dni": {"Pondelok": "Velka dispenzarna", "Utorok": "Velka dispenzarna", "Streda": "Velka dispenzarna", "Stvrtok": "Velka dispenzarna", "Piatok": "Velka dispenzarna"}, "active": True },
             "Spanik": { "moze": ["Wolf", "Mala dispenzarna"], "pevne_dni": {"Pondelok": "Mala dispenzarna", "Utorok": "Wolf", "Streda": "Wolf", "Stvrtok": "Wolf", "Piatok": "Mala dispenzarna"}, "active": True },
             "Kacurova": { "moze": ["Oddelenie"], "active": True },
@@ -203,6 +230,11 @@ def migrate_homolova_to_vidulin(config):
                     amb_data["priority"][day_key] = ["Vidulin" if x == "Homolova" else x for x in day_list]
                     changed = True
     return config, changed
+
+def is_doctor_active_on_date(doc_props, date_key):
+    if doc_props.get('active', True):
+        return True
+    return doc_props.get('short_term_active', False) and date_key in doc_props.get('extra_dni', [])
 
 def _replace_doctor_references(config, old_name, new_name=None, remove=False):
     for amb_data in config.get("ambulancie", {}).values():
@@ -471,10 +503,11 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
         if d.weekday() < 5: week_dates_str.append(d.strftime('%Y-%m-%d'))
 
     for d_name, props in config['lekari'].items():
-        if props.get('active', True) or any(ed in week_dates_str for ed in props.get('extra_dni', [])):
+        short_term_hits = [ed for ed in props.get('extra_dni', []) if ed in week_dates_str]
+        if props.get('active', True) or (props.get('short_term_active', False) and short_term_hits):
             all_doctors.append(d_name)
-            if not props.get('active', True):
-                readable = [datetime.strptime(ed, '%Y-%m-%d').strftime('%d.%m.') for ed in props.get('extra_dni', []) if ed in week_dates_str]
+            if not props.get('active', True) and props.get('short_term_active', False):
+                readable = [datetime.strptime(ed, '%Y-%m-%d').strftime('%d.%m.') for ed in short_term_hits]
                 doctors_info[d_name] = f"⚠️ len {', '.join(readable)}"
 
     all_doctors.sort()
@@ -498,7 +531,12 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
         closed_today = closures.get(date_key, [])
         data_grid[date_str] = {}
         
-        available = [d for d in all_doctors if (config['lekari'][d].get('active', True) or date_key in config['lekari'][d].get('extra_dni', [])) and d not in day_absences and day_name not in config['lekari'][d].get('nepracuje', [])]
+        available = [
+            d for d in all_doctors
+            if is_doctor_active_on_date(config['lekari'][d], date_key)
+            and d not in day_absences
+            and day_name not in config['lekari'][d].get('nepracuje', [])
+        ]
         assigned_amb = {}
         
         for doc in list(available):
@@ -583,7 +621,7 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
             if save_hist: history[date_key] = room_raw_map
         
         for doc in all_doctors:
-            if not (config['lekari'][doc].get('active', True) or date_key in config['lekari'][doc].get('extra_dni', [])):
+            if not is_doctor_active_on_date(config['lekari'][doc], date_key):
                 data_grid[date_str][doc] = ""
                 continue
             if doc in day_absences: data_grid[date_str][doc] = day_absences[doc]
@@ -671,6 +709,8 @@ def create_pdf_report(df, motto, title_prefix="Rozpis prác"):
     font_name = setup_pdf_fonts()
     doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), rightMargin=10, leftMargin=10, topMargin=10, bottomMargin=10)
     styles = getSampleStyleSheet()
+    styles['Title'].fontName = font_name
+    styles['Normal'].fontName = font_name
     cell_style = ParagraphStyle('C', parent=styles['Normal'], fontName=font_name, fontSize=7, leading=8, alignment=1)
     
     # Pre absencie pouzivame inu strukturu, pre rozpis inu
@@ -829,7 +869,11 @@ if mode == "🚀 Generovať rozpis":
 
     st.markdown("### Manuálne pridelenie izieb")
     manual_core_input = {}
-    ward_docs = [d for d, p in st.session_state.config["lekari"].items() if "Oddelenie" in p.get("moze", []) and p.get("active")]
+    ward_docs = [
+        d for d, p in st.session_state.config["lekari"].items()
+        if "Oddelenie" in p.get("moze", [])
+        and (p.get("active", True) or p.get("short_term_active", False))
+    ]
     cols = st.columns(2)
     for i, doc in enumerate(ward_docs):
         with cols[i % 2]:
@@ -969,7 +1013,7 @@ elif mode == "⚙️ Nastavenia lekárov":
     c1, c2 = st.columns([3, 1])
     n = c1.text_input("Meno:")
     if c2.button("Pridať") and n:
-        st.session_state.config['lekari'][n] = {"moze": ["Oddelenie"], "active": True, "priority": 100}
+        st.session_state.config['lekari'][n] = {"moze": ["Oddelenie"], "active": True, "short_term_active": False, "extra_dni": [], "priority": 100}
         save_config(st.session_state.config)
         st.rerun()
     
@@ -977,8 +1021,41 @@ elif mode == "⚙️ Nastavenia lekárov":
         p = st.session_state.config['lekari'][d]
         with st.expander(d):
             a = st.checkbox("Aktívny", p.get('active', True), key=f"a_{d}")
+            sta = st.checkbox("Kratkodobo aktivny", p.get('short_term_active', False), key=f"sta_{d}")
             m = st.multiselect("Môže:", list(st.session_state.config['ambulancie'].keys())+["Oddelenie"], p.get('moze', []), key=f"m_{d}")
             prio = st.number_input("Priorita lekára (nižšie = skôr)", min_value=1, max_value=999, value=int(p.get('priority', 100)), key=f"prio_{d}")
+            extra_dni_current = sorted(set(p.get('extra_dni', [])))
+
+            st.caption("Dátumy krátkodobej aktivity")
+            if extra_dni_current:
+                pretty_dates = [datetime.strptime(x, '%Y-%m-%d').strftime('%d.%m.%Y') for x in extra_dni_current]
+                st.write(", ".join(pretty_dates))
+            else:
+                st.write("Žiadne dátumy")
+
+            dr = st.date_input("Pridať rozsah dátumov:", value=[], key=f"sta_range_{d}")
+            c_add_dates, c_clear_dates = st.columns(2)
+            add_dates_clicked = c_add_dates.button("Pridať dátumy", key=f"add_dates_{d}")
+            clear_dates_clicked = c_clear_dates.button("Vymazať dátumy", key=f"clear_dates_{d}")
+
+            if add_dates_clicked and dr:
+                start_dt = dr[0]
+                end_dt = dr[1] if len(dr) > 1 else dr[0]
+                if end_dt < start_dt:
+                    start_dt, end_dt = end_dt, start_dt
+                new_dates = set(extra_dni_current)
+                cur = start_dt
+                while cur <= end_dt:
+                    new_dates.add(cur.strftime('%Y-%m-%d'))
+                    cur += timedelta(days=1)
+                p['extra_dni'] = sorted(new_dates)
+                save_config(st.session_state.config)
+                st.rerun()
+
+            if clear_dates_clicked and extra_dni_current:
+                p['extra_dni'] = []
+                save_config(st.session_state.config)
+                st.rerun()
 
             c_rename, c_remove = st.columns(2)
             new_name = c_rename.text_input("Premenovať na:", value=d, key=f"rename_{d}")
@@ -1003,8 +1080,13 @@ elif mode == "⚙️ Nastavenia lekárov":
                 else:
                     st.error(msg)
 
-            if a!=p.get('active', True) or m!=p.get('moze', []) or int(prio)!=int(p.get('priority', 100)):
-                p['active'], p['moze'], p['priority'] = a, m, int(prio)
+            if (
+                a!=p.get('active', True)
+                or sta!=p.get('short_term_active', False)
+                or m!=p.get('moze', [])
+                or int(prio)!=int(p.get('priority', 100))
+            ):
+                p['active'], p['short_term_active'], p['moze'], p['priority'] = a, sta, m, int(prio)
                 save_config(st.session_state.config)
 
 elif mode == "🏥 Nastavenia ambulancií":
