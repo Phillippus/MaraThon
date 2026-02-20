@@ -32,6 +32,7 @@ HISTORY_FILE = 'room_history.json'
 PRIVATE_CALENDAR_URL = "https://calendar.google.com/calendar/ical/fntnonk%40gmail.com/private-e8ce4e0639a626387fff827edd26b87f/basic.ics"
 GIST_FILENAME_CONFIG = "hospital_config_v26.json"
 GIST_FILENAME_HISTORY = "room_history_v26.json"
+REQUEST_TIMEOUT_SECONDS = 15
 
 ROOMS_LIST = [
     (1, 3), (2, 3), (3, 3), (4, 3), (5, 3),
@@ -66,7 +67,7 @@ def get_gist_id(filename):
     try:
         token = st.secrets["github"]["token"]
         headers = {"Authorization": f"token {token}"}
-        resp = requests.get("https://api.github.com/gists", headers=headers)
+        resp = requests.get("https://api.github.com/gists", headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
         resp.raise_for_status()
         for gist in resp.json():
             if filename in gist['files']: return gist['id']
@@ -80,7 +81,7 @@ def load_data_from_gist(filename):
     try:
         token = st.secrets["github"]["token"]
         headers = {"Authorization": f"token {token}"}
-        resp = requests.get(f"https://api.github.com/gists/{gist_id}", headers=headers)
+        resp = requests.get(f"https://api.github.com/gists/{gist_id}", headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
         resp.raise_for_status()
         content = resp.json()['files'][filename]['content']
         return json.loads(content)
@@ -97,8 +98,8 @@ def save_data_to_gist(filename, data):
             "public": False,
             "files": { filename: {"content": json.dumps(data, ensure_ascii=False, indent=2)} }
         }
-        if gist_id: requests.patch(f"https://api.github.com/gists/{gist_id}", json=payload, headers=headers)
-        else: requests.post("https://api.github.com/gists", json=payload, headers=headers)
+        if gist_id: requests.patch(f"https://api.github.com/gists/{gist_id}", json=payload, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
+        else: requests.post("https://api.github.com/gists", json=payload, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
     except: pass
 
 def _load_data(gist_filename, local_filename, default_factory):
@@ -125,6 +126,11 @@ def load_config():
             "default_body": "Dobrý deň,\nv prílohe posielam prehľad neprítomností." 
         }
         changed = True
+
+    for doctor_data in config.get('lekari', {}).values():
+        if 'priority' not in doctor_data:
+            doctor_data['priority'] = 100
+            changed = True
         
     if changed: save_config(config)
     return config
@@ -198,42 +204,119 @@ def migrate_homolova_to_vidulin(config):
                     changed = True
     return config, changed
 
-def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, manual_preferences=None):
+def _replace_doctor_references(config, old_name, new_name=None, remove=False):
+    for amb_data in config.get("ambulancie", {}).values():
+        prio = amb_data.get("priority")
+        if isinstance(prio, list):
+            updated = []
+            for doc_name in prio:
+                if doc_name == old_name:
+                    if remove:
+                        continue
+                    updated.append(new_name)
+                else:
+                    updated.append(doc_name)
+            amb_data["priority"] = updated
+        elif isinstance(prio, dict):
+            for day_key, day_list in prio.items():
+                updated = []
+                for doc_name in day_list:
+                    if doc_name == old_name:
+                        if remove:
+                            continue
+                        updated.append(new_name)
+                    else:
+                        updated.append(doc_name)
+                prio[day_key] = updated
+
+        if isinstance(amb_data.get("check_presence"), list):
+            if remove:
+                amb_data["check_presence"] = [x for x in amb_data["check_presence"] if x != old_name]
+            else:
+                amb_data["check_presence"] = [new_name if x == old_name else x for x in amb_data["check_presence"]]
+
+        if amb_data.get("conditional_owner") == old_name:
+            amb_data["conditional_owner"] = None if remove else new_name
+
+def _rename_doctor_in_history(history, old_name, new_name):
+    for day_key, day_map in history.items():
+        if old_name in day_map:
+            day_map[new_name] = day_map.pop(old_name)
+
+def _rename_doctor_in_manual_core(manual_core, old_name, new_name):
+    for date_key, day_map in manual_core.items():
+        if old_name in day_map:
+            day_map[new_name] = day_map.pop(old_name)
+
+def rename_doctor_everywhere(config, history, manual_core, old_name, new_name):
+    if old_name not in config.get("lekari", {}):
+        return False, "Lekár neexistuje."
+    new_name = (new_name or "").strip()
+    if not new_name:
+        return False, "Nové meno je prázdne."
+    if new_name != old_name and new_name in config["lekari"]:
+        return False, "Lekár s týmto menom už existuje."
+    if new_name == old_name:
+        return True, ""
+
+    config["lekari"][new_name] = config["lekari"].pop(old_name)
+    _replace_doctor_references(config, old_name, new_name=new_name, remove=False)
+    _rename_doctor_in_history(history, old_name, new_name)
+    _rename_doctor_in_manual_core(manual_core, old_name, new_name)
+    return True, ""
+
+def remove_doctor_everywhere(config, history, manual_core, doctor_name):
+    if doctor_name not in config.get("lekari", {}):
+        return False, "Lekár neexistuje."
+    config["lekari"].pop(doctor_name, None)
+    _replace_doctor_references(config, doctor_name, remove=True)
+    for day_map in history.values():
+        day_map.pop(doctor_name, None)
+    for day_map in manual_core.values():
+        day_map.pop(doctor_name, None)
+    return True, ""
+
+def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, manual_preferences=None, doctor_priorities=None):
     if not doctors_list: return {}, {}
     if manual_preferences is None: manual_preferences = {}
     if previous_assignments is None: previous_assignments = {}
-    
-    rt_help_doc = "Miklatkova" if "Miklatkova" in doctors_list else None
-    head_doc = "Kurisova" if "Kurisova" in doctors_list else None
-    
+    if doctor_priorities is None: doctor_priorities = {}
+
+    total_beds = sum(r[1] for r in ROOMS_LIST)
+    min_docs_for_limit = math.ceil(total_beds / 15)
+    protected = ["Miklatkova", "Kohutek", "Kurisova"]
+    non_protected = [d for d in doctors_list if d not in protected]
+    use_for_rooms = list(non_protected)
+
+    if len(non_protected) < min_docs_for_limit:
+        for fallback_doc in protected:
+            if fallback_doc in doctors_list and fallback_doc not in use_for_rooms:
+                use_for_rooms.append(fallback_doc)
+            if len(use_for_rooms) >= min_docs_for_limit:
+                break
+    elif len(non_protected) >= 3:
+        use_for_rooms = list(non_protected)
+
+    no_room_docs = [d for d in doctors_list if d not in use_for_rooms]
+    if not use_for_rooms:
+        use_for_rooms = list(doctors_list)
+        no_room_docs = []
+
     assignment = {d: [] for d in doctors_list}
     current_beds = {d: 0 for d in doctors_list}
     available_rooms = sorted(ROOMS_LIST, key=lambda x: x[0]) 
-    
-    # --- 1. TARGET CALCULATION ---
-    rt_group = [d for d in doctors_list if d == rt_help_doc or d == wolf_doc_name]
-    full_group = [d for d in doctors_list if d not in rt_group and d != head_doc]
-    if head_doc and head_doc not in rt_group and len(full_group) < 2: full_group.append(head_doc)
-    
-    total_beds = sum(r[1] for r in ROOMS_LIST)
-    targets = {}
-    used_by_rt = 0
-    
-    rt_limit = 9 if len(full_group) >= 3 else 12
-    for d in rt_group:
-        targets[d] = rt_limit
-        used_by_rt += targets[d]
-        
-    beds_for_full = total_beds - used_by_rt
-    if full_group:
-        fair_share = min(15, math.floor(beds_for_full / len(full_group)) + 1)
-        for d in full_group: targets[d] = fair_share
 
-    if head_doc and head_doc not in targets: targets[head_doc] = 0
+    # --- 1. TARGET CALCULATION (equal load, respect 15 where possible) ---
+    targets = {d: 0 for d in doctors_list}
+    base = total_beds // len(use_for_rooms)
+    rem = total_beds % len(use_for_rooms)
+    ordered_for_target = sorted(use_for_rooms, key=lambda d: (doctor_priorities.get(d, 100), d))
+    for i, doc in enumerate(ordered_for_target):
+        targets[doc] = base + (1 if i < rem else 0)
 
     # --- 2. PREFERENCIE (MANUAL) ---
     for doc, nums in manual_preferences.items():
-        if doc not in doctors_list: continue
+        if doc not in use_for_rooms: continue
         my_target = targets.get(doc, 15)
         for num in nums:
             r_obj = next((r for r in available_rooms if r[0] == num), None)
@@ -245,7 +328,7 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
 
     # --- 3. KONTINUITA (PREVIOUS) ---
     if previous_assignments:
-        for doc in doctors_list:
+        for doc in use_for_rooms:
             if doc in previous_assignments:
                 my_prev = []
                 for r_id in previous_assignments[doc]:
@@ -261,9 +344,9 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
 
     # --- 4. DOROVNÁVANIE ---
     while available_rooms:
-        candidates = [d for d in doctors_list if current_beds[d] < targets.get(d, 15)]
-        if not candidates: candidates = doctors_list
-        candidates.sort(key=lambda d: current_beds[d])
+        candidates = [d for d in use_for_rooms if current_beds[d] < targets.get(d, 15)]
+        if not candidates: candidates = list(use_for_rooms)
+        candidates.sort(key=lambda d: (current_beds[d], doctor_priorities.get(d, 100), d))
         receiver = candidates[0]
         best_room = available_rooms[0]
         if assignment[receiver]:
@@ -278,24 +361,22 @@ def distribute_rooms(doctors_list, wolf_doc_name, previous_assignments=None, man
         rooms = sorted(assignment[doc], key=lambda x: x[0])
         result_raw[doc] = [r[0] for r in rooms]
         r_str = ", ".join([str(r[0]) for r in rooms])
-        suf = ""
-        if doc == wolf_doc_name: suf = " + Wolf"
-        elif doc == head_doc and "RT" not in suf: suf = " + RT oddelenie"
-        elif doc == rt_help_doc: suf = " + RT oddelenie"
-        
+
         if not rooms:
-             if doc == wolf_doc_name: result_text[doc] = "Wolf (0L)"
-             elif doc == head_doc: result_text[doc] = "RT oddelenie"
-             elif doc == rt_help_doc: result_text[doc] = "RT oddelenie (0L)"
-             else: result_text[doc] = ""
+             if doc in no_room_docs and doc in ["Miklatkova", "Kohutek", "Kurisova"]:
+                 result_text[doc] = "RT oddelenie"
+             elif doc == wolf_doc_name:
+                 result_text[doc] = "Wolf (0L)"
+             else:
+                 result_text[doc] = ""
         else:
-             result_text[doc] = f"{r_str}{suf}"
+             result_text[doc] = f"{r_str} + Wolf" if doc == wolf_doc_name else r_str
              
     return result_text, result_raw
 
 def get_ical_events(start_date, end_date):
     try:
-        response = requests.get(PRIVATE_CALENDAR_URL)
+        response = requests.get(PRIVATE_CALENDAR_URL, timeout=REQUEST_TIMEOUT_SECONDS)
         response.raise_for_status()
         c = Calendar(response.text)
         absences = {}
@@ -397,6 +478,7 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
                 doctors_info[d_name] = f"⚠️ len {', '.join(readable)}"
 
     all_doctors.sort()
+    doctor_priorities = {d: config['lekari'].get(d, {}).get('priority', 100) for d in all_doctors}
     history = load_history()
     last_day_assignments = history.get((thursday - timedelta(days=1)).strftime('%Y-%m-%d'), {})
     manual_all = st.session_state.get("manual_core", {})
@@ -453,9 +535,26 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
             if not cands:
                 assigned_amb[amb] = "NEOBSADENÉ"
                 continue
+            cands = sorted(
+                cands,
+                key=lambda d: (
+                    1 if d == "Bystricky" else 0,
+                    doctor_priorities.get(d, 100),
+                    item['candidates'].index(d)
+                )
+            )
             chosen = cands[0]
             assigned_amb[amb] = chosen
             available.remove(chosen)
+
+        # Na 2A/2B staci obsadit aspon jednu RT ambulanciu.
+        non_active_values = {"NEOBSADENÉ", "ZATVORENÉ", "---", ""}
+        r2a = assigned_amb.get("Radio 2A", "")
+        r2b = assigned_amb.get("Radio 2B", "")
+        if r2a not in non_active_values and r2b == "NEOBSADENÉ":
+            assigned_amb["Radio 2B"] = "---"
+        if r2b not in non_active_values and r2a == "NEOBSADENÉ":
+            assigned_amb["Radio 2A"] = "---"
 
         for k, v in assigned_amb.items(): data_grid[date_str][k] = v
         
@@ -469,13 +568,17 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
                 ward_cands.append(wolf_doc)
             
             daily_pref = manual_all.get(date_key, {})
-            if not daily_pref and i < 7:
-                 first_day_key = dates[0] if dates else date_key
-                 start_key = start_date.strftime('%Y-%m-%d')
-                 if start_key in manual_all:
-                     daily_pref = manual_all[start_key]
+            if not daily_pref:
+                start_key = start_date.strftime('%Y-%m-%d')
+                daily_pref = manual_all.get(start_key, {})
 
-            room_text_map, room_raw_map = distribute_rooms(ward_cands, wolf_doc, last_day_assignments, daily_pref)
+            room_text_map, room_raw_map = distribute_rooms(
+                ward_cands,
+                wolf_doc,
+                last_day_assignments,
+                daily_pref,
+                doctor_priorities=doctor_priorities
+            )
             last_day_assignments = room_raw_map
             if save_hist: history[date_key] = room_raw_map
         
@@ -489,7 +592,8 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
                 my = [a for a, d in assigned_amb.items() if d == doc]
                 data_grid[date_str][doc] = " + ".join(my) if my else ""
                 
-        if save_hist: save_history(history)
+    if save_hist:
+        save_history(history)
     return dates, data_grid, all_doctors, doctors_info, dates_raw
 
 def scan_future_problems(config, weeks_ahead=12):
@@ -628,10 +732,15 @@ def create_pdf_report(df, motto, title_prefix="Rozpis prác"):
     return buffer.getvalue()
 
 def send_email_with_pdf(pdf_bytes, filename, to_email, subject, body):
-    if "email" not in st.secrets: return False
+    if "email" not in st.secrets:
+        return False, "Chýba sekcia [email] v secrets."
+    if not to_email or not to_email.strip():
+        return False, "Nie je zadaný príjemca emailu."
     try:
+        sender = st.secrets["email"]["username"]
+        password = st.secrets["email"]["password"]
         msg = MIMEMultipart()
-        msg['From'], msg['To'], msg['Subject'] = st.secrets["email"]["username"], to_email, subject
+        msg['From'], msg['To'], msg['Subject'] = sender, to_email, subject
         msg.attach(MIMEText(body, 'plain'))
         part = MIMEBase('application', 'octet-stream')
         part.set_payload(pdf_bytes)
@@ -640,11 +749,14 @@ def send_email_with_pdf(pdf_bytes, filename, to_email, subject, body):
         msg.attach(part)
         server = smtplib.SMTP('smtp.gmail.com', 587)
         server.starttls()
-        server.login(msg['From'], "ijhk zzgf zsii gmsk")
+        server.login(sender, password)
         server.send_message(msg)
         server.quit()
-        return True
-    except: return False
+        return True, ""
+    except KeyError as e:
+        return False, f"Chýba kľúč v secrets: {e}"
+    except Exception as e:
+        return False, str(e)
 
 def group_closures_to_intervals(closures_dict):
     sorted_dates = sorted(closures_dict.keys())
@@ -781,10 +893,11 @@ if mode == "🚀 Generovať rozpis":
                     subj_abs = email_abs.get('default_subject', "Nepritomnosti")
                     body_abs = email_abs.get('default_body', "V prilohe.")
                     
-                    if send_email_with_pdf(pdf_abs, fn_abs, to_abs, subj_abs, body_abs):
+                    ok, err = send_email_with_pdf(pdf_abs, fn_abs, to_abs, subj_abs, body_abs)
+                    if ok:
                         st.success(f"Absencie odoslané na {to_abs}")
                     else:
-                        st.error("Chyba pri odosielaní absencií")
+                        st.error(f"Chyba pri odosielaní absencií: {err}")
 
         # --- SEKCE PRE HLAVNY ROZPIS ---
         st.info("✏️ Tabuľku nižšie môžete priamo editovať. Zmeny sa prejavia v exportoch.")
@@ -844,26 +957,54 @@ if mode == "🚀 Generovať rozpis":
         with st.expander("📧 Email - Hlavný rozpis"):
             to = st.text_input("Komu (Rozpis):", st.session_state.config['email_settings']['default_to'])
             if st.button("Odoslať Rozpis"):
-                if send_email_with_pdf(pdf, f"{fn}.pdf", to, st.session_state.config['email_settings']['default_subject'], st.session_state.config['email_settings']['default_body']):
+                ok, err = send_email_with_pdf(pdf, f"{fn}.pdf", to, st.session_state.config['email_settings']['default_subject'], st.session_state.config['email_settings']['default_body'])
+                if ok:
                     st.success(f"Rozpis odoslaný na {to}")
                 else:
-                     st.error("Chyba pri odosielaní rozpisu")
+                     st.error(f"Chyba pri odosielaní rozpisu: {err}")
 
 elif mode == "⚙️ Nastavenia lekárov":
     st.header("Lekári")
+    history_cache = load_history()
     c1, c2 = st.columns([3, 1])
     n = c1.text_input("Meno:")
     if c2.button("Pridať") and n:
-        st.session_state.config['lekari'][n] = {"moze": ["Oddelenie"], "active": True}
+        st.session_state.config['lekari'][n] = {"moze": ["Oddelenie"], "active": True, "priority": 100}
         save_config(st.session_state.config)
         st.rerun()
     
-    for d, p in st.session_state.config['lekari'].items():
+    for d in list(st.session_state.config['lekari'].keys()):
+        p = st.session_state.config['lekari'][d]
         with st.expander(d):
             a = st.checkbox("Aktívny", p.get('active', True), key=f"a_{d}")
             m = st.multiselect("Môže:", list(st.session_state.config['ambulancie'].keys())+["Oddelenie"], p.get('moze', []), key=f"m_{d}")
-            if a!=p.get('active', True) or m!=p.get('moze', []):
-                p['active'], p['moze'] = a, m
+            prio = st.number_input("Priorita lekára (nižšie = skôr)", min_value=1, max_value=999, value=int(p.get('priority', 100)), key=f"prio_{d}")
+
+            c_rename, c_remove = st.columns(2)
+            new_name = c_rename.text_input("Premenovať na:", value=d, key=f"rename_{d}")
+            rename_clicked = c_rename.button("Premenovať", key=f"btn_rename_{d}")
+            remove_clicked = c_remove.button("Odstrániť lekára", key=f"btn_remove_{d}")
+
+            if rename_clicked:
+                ok, msg = rename_doctor_everywhere(st.session_state.config, history_cache, st.session_state.manual_core, d, new_name)
+                if ok:
+                    save_config(st.session_state.config)
+                    save_history(history_cache)
+                    st.rerun()
+                else:
+                    st.error(msg)
+
+            if remove_clicked:
+                ok, msg = remove_doctor_everywhere(st.session_state.config, history_cache, st.session_state.manual_core, d)
+                if ok:
+                    save_config(st.session_state.config)
+                    save_history(history_cache)
+                    st.rerun()
+                else:
+                    st.error(msg)
+
+            if a!=p.get('active', True) or m!=p.get('moze', []) or int(prio)!=int(p.get('priority', 100)):
+                p['active'], p['moze'], p['priority'] = a, m, int(prio)
                 save_config(st.session_state.config)
 
 elif mode == "🏥 Nastavenia ambulancií":
