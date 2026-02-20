@@ -877,9 +877,9 @@ if mode == "🚀 Generovať rozpis":
 
     if st.button("📥 Načítať izby z minulého týždňa"):
         curr_week_start = start_d + timedelta(days=(3 - start_d.weekday()) % 7)
-        prev_week_key = (curr_week_start - timedelta(days=7)).strftime('%Y-%m-%d')
+        prev_cycle_last_day_key = (curr_week_start - timedelta(days=1)).strftime('%Y-%m-%d')
         history_for_load = load_history()
-        prev_rooms = history_for_load.get(prev_week_key, {})
+        prev_rooms = history_for_load.get(prev_cycle_last_day_key, {})
         if prev_rooms:
             loaded_manual = {}
             for doc in ward_docs:
@@ -891,11 +891,11 @@ if mode == "🚀 Generovať rozpis":
                         st.session_state[f"core_{doc}"] = ", ".join(str(x) for x in room_nums)
             if loaded_manual:
                 st.session_state.manual_core[start_d.strftime('%Y-%m-%d')] = loaded_manual
-                st.success(f"Načítané izby z dátumu {prev_week_key}.")
+                st.success(f"Načítané izby z posledného dňa predošlého cyklu ({prev_cycle_last_day_key}).")
             else:
-                st.warning(f"V histórii ({prev_week_key}) neboli nájdené izby pre aktívnych lekárov oddelenia.")
+                st.warning(f"V histórii ({prev_cycle_last_day_key}) neboli nájdené izby pre aktívnych lekárov oddelenia.")
         else:
-            st.warning(f"V histórii nie je záznam pre {prev_week_key}.")
+            st.warning(f"V histórii nie je záznam pre posledný deň predošlého cyklu ({prev_cycle_last_day_key}).")
 
     cols = st.columns(2)
     for i, doc in enumerate(ward_docs):
