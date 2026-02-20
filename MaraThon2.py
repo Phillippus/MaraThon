@@ -364,8 +364,13 @@ def distribute_rooms(
     min_docs_for_limit = math.ceil(total_beds / 15)
     protected = ["Miklatkova", "Kohutek", "Kurisova"]
     overflow_order = ["Kurisova", "Kohutek", "Martinka"]
-    overflow_only_when_capped = set(overflow_order) if custom_cap_docs else set()
-    non_protected = [d for d in doctors_list if d not in protected and d not in overflow_only_when_capped]
+    overflow_only_when_capped = {d for d in overflow_order if d not in custom_cap_docs} if custom_cap_docs else set()
+    # Doctors with explicit manual caps must stay in the ward pool (e.g. Miklatkova=10).
+    non_protected = [
+        d for d in doctors_list
+        if (d not in protected or d in custom_cap_docs)
+        and d not in overflow_only_when_capped
+    ]
     use_for_rooms = list(non_protected)
     fallback_order = overflow_order + ["Miklatkova"] if custom_cap_docs else protected
 
