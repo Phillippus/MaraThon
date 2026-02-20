@@ -640,7 +640,7 @@ def send_email_with_pdf(pdf_bytes, filename, to_email, subject, body):
         msg.attach(part)
         server = smtplib.SMTP('smtp.gmail.com', 587)
         server.starttls()
-        server.login(msg['From'], st.secrets["email"]["password"])
+        server.login(msg['From'], "PellegriniJeGay")
         server.send_message(msg)
         server.quit()
         return True
