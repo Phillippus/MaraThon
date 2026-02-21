@@ -308,7 +308,7 @@ def remove_doctor_everywhere(config, history, manual_core, doctor_name):
         day_map.pop(doctor_name, None)
     return True, ""
 
-def parse_manual_day_preferences(day_pref):
+def parse_manual_day_preferences(day_pref, workday_index=None, date_key=None):
     manual_rooms = {}
     manual_max_patients = {}
     locked_rooms = {}
@@ -320,11 +320,15 @@ def parse_manual_day_preferences(day_pref):
         if isinstance(val, dict):
             rooms = val.get("rooms", [])
             max_patients = val.get("max_patients", None)
+            max_patients_by_period = val.get("max_patients_by_period", None)
+            max_patients_by_dates = val.get("max_patients_by_dates", None)
             locked = bool(val.get("locked_rooms", False))
             force_to_ward = bool(val.get("force_to_ward", False))
         else:
             rooms = val
             max_patients = None
+            max_patients_by_period = None
+            max_patients_by_dates = None
             locked = False
             force_to_ward = False
 
@@ -333,7 +337,34 @@ def parse_manual_day_preferences(day_pref):
         parsed_rooms = [int(x) for x in rooms if isinstance(x, int) or (isinstance(x, str) and str(x).isdigit())]
         manual_rooms[doc] = parsed_rooms
 
-        if max_patients is not None:
+        if isinstance(max_patients_by_dates, list) and date_key:
+            chosen_cap = None
+            for rule in max_patients_by_dates:
+                if not isinstance(rule, dict):
+                    continue
+                start = str(rule.get("start", "")).strip()
+                end = str(rule.get("end", "")).strip()
+                cap_val = rule.get("cap", None)
+                if not start or not end or cap_val is None:
+                    continue
+                if start > end:
+                    start, end = end, start
+                if start <= date_key <= end:
+                    try:
+                        chosen_cap = int(cap_val)
+                    except:
+                        pass
+            if chosen_cap is not None:
+                manual_max_patients[doc] = chosen_cap
+        elif isinstance(max_patients_by_period, dict) and workday_index is not None:
+            period_key = "first_two_days" if workday_index < 2 else "rest_days"
+            try:
+                period_val = max_patients_by_period.get(period_key)
+                if period_val is not None:
+                    manual_max_patients[doc] = int(period_val)
+            except:
+                pass
+        elif max_patients is not None:
             try:
                 manual_max_patients[doc] = int(max_patients)
             except:
@@ -624,6 +655,7 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
     
     dates_raw = []
     start_key = start_date.strftime('%Y-%m-%d')
+    workday_index = 0
 
     for i in range(7):
         curr_date = thursday + timedelta(days=i)
@@ -640,7 +672,11 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
         daily_pref = manual_all.get(date_key, {})
         if not daily_pref:
             daily_pref = manual_all.get(start_key, {})
-        manual_rooms, manual_max_patients, locked_rooms, force_ward = parse_manual_day_preferences(daily_pref)
+        manual_rooms, manual_max_patients, locked_rooms, force_ward = parse_manual_day_preferences(
+            daily_pref,
+            workday_index=workday_index,
+            date_key=date_key
+        )
         forced_ward_docs = {doc for doc, forced in force_ward.items() if forced and doc in all_doctors}
         
         available = [
@@ -749,6 +785,7 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
             else:
                 my = [a for a, d in assigned_amb.items() if d == doc]
                 data_grid[date_str][doc] = " + ".join(my) if my else ""
+        workday_index += 1
                 
     if save_hist:
         save_history(history)
@@ -1013,6 +1050,7 @@ if mode == "🚀 Generovať rozpis":
                         loaded_manual[doc] = {"rooms": room_nums, "max_patients": 15, "locked_rooms": False}
                         st.session_state[f"core_{doc}"] = ", ".join(str(x) for x in room_nums)
                         st.session_state[f"core_max_{doc}"] = 15
+                        st.session_state[f"core_cap_rules_{doc}"] = []
                         st.session_state[f"core_lock_{doc}"] = False
                         st.session_state[f"core_force_ward_{doc}"] = False
             if loaded_manual:
@@ -1030,11 +1068,15 @@ if mode == "🚀 Generovať rozpis":
             doc_manual = current_manual_day.get(doc, {})
             if isinstance(doc_manual, dict):
                 default_rooms = doc_manual.get("rooms", [])
+                default_cap_rules = doc_manual.get("max_patients_by_dates", [])
+                if not isinstance(default_cap_rules, list):
+                    default_cap_rules = []
                 default_max = int(doc_manual.get("max_patients", 15) or 15)
                 default_lock = bool(doc_manual.get("locked_rooms", False))
                 default_force = bool(doc_manual.get("force_to_ward", False))
             else:
                 default_rooms = doc_manual if isinstance(doc_manual, list) else []
+                default_cap_rules = []
                 default_max = 15
                 default_lock = False
                 default_force = False
@@ -1043,6 +1085,8 @@ if mode == "🚀 Generovať rozpis":
                 st.session_state[f"core_{doc}"] = ", ".join(str(x) for x in default_rooms)
             if f"core_max_{doc}" not in st.session_state:
                 st.session_state[f"core_max_{doc}"] = default_max
+            if f"core_cap_rules_{doc}" not in st.session_state:
+                st.session_state[f"core_cap_rules_{doc}"] = default_cap_rules
             if f"core_lock_{doc}" not in st.session_state:
                 st.session_state[f"core_lock_{doc}"] = default_lock
             if f"core_force_ward_{doc}" not in st.session_state:
@@ -1057,6 +1101,42 @@ if mode == "🚀 Generovať rozpis":
                 value=int(st.session_state[f"core_max_{doc}"]),
                 key=f"core_max_{doc}"
             )
+            cap_rules = st.session_state.get(f"core_cap_rules_{doc}", [])
+            st.caption("Cap pre konkrétne dátumy")
+            if cap_rules:
+                for idx_rule, rule in enumerate(cap_rules):
+                    s = str(rule.get("start", ""))
+                    e = str(rule.get("end", ""))
+                    c = rule.get("cap", "")
+                    st.text(f"{idx_rule+1}. {s} - {e}: {c}")
+            else:
+                st.text("Žiadne pravidlá")
+
+            c_rule_d, c_rule_cap, c_rule_add = st.columns([2, 1, 1])
+            cap_range = c_rule_d.date_input("Rozsah cap dátumov:", value=[], key=f"core_cap_range_{doc}")
+            cap_value = c_rule_cap.number_input("Cap (dátumy):", min_value=1, max_value=42, value=int(max_pat), key=f"core_cap_val_{doc}")
+            add_cap_rule = c_rule_add.button("Pridať cap", key=f"core_cap_add_{doc}")
+            clear_cap_rules = st.button(f"Vymazať cap dátumy Dr {doc}", key=f"core_cap_clear_{doc}")
+
+            if add_cap_rule and cap_range:
+                start_dt = cap_range[0]
+                end_dt = cap_range[1] if len(cap_range) > 1 else cap_range[0]
+                if end_dt < start_dt:
+                    start_dt, end_dt = end_dt, start_dt
+                updated_rules = list(cap_rules)
+                updated_rules.append({
+                    "start": start_dt.strftime('%Y-%m-%d'),
+                    "end": end_dt.strftime('%Y-%m-%d'),
+                    "cap": int(cap_value)
+                })
+                st.session_state[f"core_cap_rules_{doc}"] = updated_rules
+                st.rerun()
+
+            if clear_cap_rules and cap_rules:
+                st.session_state[f"core_cap_rules_{doc}"] = []
+                st.rerun()
+
+            cap_rules = st.session_state.get(f"core_cap_rules_{doc}", [])
             lock_rooms = st.checkbox(f"Dr {doc} – Zamknúť pridelené izby", key=f"core_lock_{doc}")
             force_ward = st.checkbox(f"Dr {doc} – Prideliť na oddelenie", key=f"core_force_ward_{doc}")
             if val.strip():
@@ -1064,18 +1144,24 @@ if mode == "🚀 Generovať rozpis":
                     parsed_rooms = [int(p.strip()) for p in val.split(',') if p.strip().isdigit()]
                     manual_core_input[doc] = {
                         "rooms": parsed_rooms,
-                        "max_patients": int(max_pat),
                         "locked_rooms": bool(lock_rooms),
                         "force_to_ward": bool(force_ward)
                     }
+                    if cap_rules:
+                        manual_core_input[doc]["max_patients_by_dates"] = cap_rules
+                    else:
+                        manual_core_input[doc]["max_patients"] = int(max_pat)
                 except: pass
-            elif int(max_pat) != 15 or bool(lock_rooms) or bool(force_ward):
+            elif int(max_pat) != 15 or bool(lock_rooms) or bool(force_ward) or bool(cap_rules):
                 manual_core_input[doc] = {
                     "rooms": [],
-                    "max_patients": int(max_pat),
                     "locked_rooms": bool(lock_rooms),
                     "force_to_ward": bool(force_ward)
                 }
+                if cap_rules:
+                    manual_core_input[doc]["max_patients_by_dates"] = cap_rules
+                else:
+                    manual_core_input[doc]["max_patients"] = int(max_pat)
     
     if manual_core_input:
         st.session_state.manual_core[start_d.strftime('%Y-%m-%d')] = manual_core_input
