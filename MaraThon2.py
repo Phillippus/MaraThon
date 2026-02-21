@@ -407,7 +407,7 @@ def distribute_rooms(
     assignment = {d: [] for d in doctors_list}
     current_beds = {d: 0 for d in doctors_list}
     available_rooms = sorted(ROOMS_LIST, key=lambda x: x[0]) 
-    hard_caps = {d: max(1, int(doctor_max_patients.get(d, 15))) for d in use_for_rooms}
+    hard_caps = {d: max(0, int(doctor_max_patients.get(d, 15))) for d in use_for_rooms}
 
     # Locked/manual-only overflow docs must still keep exactly their rooms.
     for doc in overflow_order:
@@ -494,7 +494,7 @@ def distribute_rooms(
                 for doc in active_overflow_docs:
                     if doc not in use_for_rooms:
                         use_for_rooms.append(doc)
-                        hard_caps[doc] = max(1, int(doctor_max_patients.get(doc, 15)))
+                        hard_caps[doc] = max(0, int(doctor_max_patients.get(doc, 15)))
                 for doc in active_overflow_docs:
                     if doc not in use_for_rooms or doc in locked_doctors:
                         continue
@@ -1096,7 +1096,7 @@ if mode == "🚀 Generovať rozpis":
             val = c_rooms.text_input(f"Dr {doc} – izby (napr. 1, 4):", key=f"core_{doc}")
             max_pat = c_max.number_input(
                 f"Dr {doc} – maximum pacientov:",
-                min_value=1,
+                min_value=0,
                 max_value=42,
                 value=int(st.session_state[f"core_max_{doc}"]),
                 key=f"core_max_{doc}"
@@ -1114,7 +1114,7 @@ if mode == "🚀 Generovať rozpis":
 
             c_rule_d, c_rule_cap, c_rule_add = st.columns([2, 1, 1])
             cap_range = c_rule_d.date_input("Rozsah cap dátumov:", value=[], key=f"core_cap_range_{doc}")
-            cap_value = c_rule_cap.number_input("Cap (dátumy):", min_value=1, max_value=42, value=int(max_pat), key=f"core_cap_val_{doc}")
+            cap_value = c_rule_cap.number_input("Cap (dátumy):", min_value=0, max_value=42, value=int(max_pat), key=f"core_cap_val_{doc}")
             add_cap_rule = c_rule_add.button("Pridať cap", key=f"core_cap_add_{doc}")
             clear_cap_rules = st.button(f"Vymazať cap dátumy Dr {doc}", key=f"core_cap_clear_{doc}")
 
