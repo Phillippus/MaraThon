@@ -350,7 +350,8 @@ def distribute_rooms(
     manual_preferences=None,
     doctor_priorities=None,
     doctor_max_patients=None,
-    locked_preferences=None
+    locked_preferences=None,
+    forced_ward_preferences=None
 ):
     if not doctors_list: return {}, {}
     if manual_preferences is None: manual_preferences = {}
@@ -358,63 +359,47 @@ def distribute_rooms(
     if doctor_priorities is None: doctor_priorities = {}
     if doctor_max_patients is None: doctor_max_patients = {}
     if locked_preferences is None: locked_preferences = {}
+    if forced_ward_preferences is None: forced_ward_preferences = {}
     custom_cap_docs = set(doctor_max_patients.keys())
 
     total_beds = sum(r[1] for r in ROOMS_LIST)
-    min_docs_for_limit = math.ceil(total_beds / 15)
-    protected = ["Miklatkova", "Kohutek", "Kurisova"]
     overflow_order = ["Kurisova", "Kohutek", "Martinka"]
-    overflow_only_when_capped = {d for d in overflow_order if d not in custom_cap_docs} if custom_cap_docs else set()
-    # Doctors with explicit manual caps must stay in the ward pool (e.g. Miklatkova=10).
-    non_protected = [
+    regular_pool = [
         d for d in doctors_list
-        if (d not in protected or d in custom_cap_docs)
-        and d not in overflow_only_when_capped
+        if d not in overflow_order or forced_ward_preferences.get(d, False)
     ]
-    use_for_rooms = list(non_protected)
-    fallback_order = overflow_order + ["Miklatkova"] if custom_cap_docs else protected
+    if not regular_pool:
+        regular_pool = list(doctors_list)
 
-    if len(non_protected) < min_docs_for_limit:
-        for fallback_doc in fallback_order:
-            if fallback_doc in doctors_list and fallback_doc not in use_for_rooms:
-                use_for_rooms.append(fallback_doc)
-            if len(use_for_rooms) >= min_docs_for_limit:
-                break
-    elif len(non_protected) >= 3:
-        use_for_rooms = list(non_protected)
-
-    if not use_for_rooms:
-        use_for_rooms = list(doctors_list)
-
-    initial_use_for_rooms = list(use_for_rooms)
+    use_for_rooms = list(regular_pool)
+    initial_regular_pool = list(regular_pool)
     assignment = {d: [] for d in doctors_list}
     current_beds = {d: 0 for d in doctors_list}
     available_rooms = sorted(ROOMS_LIST, key=lambda x: x[0]) 
     hard_caps = {d: max(1, int(doctor_max_patients.get(d, 15))) for d in use_for_rooms}
 
-    # If caps on current ward doctors cannot hold all patients, add overflow
-    # first to Kurisova, then Kohutek, then Martinka (if available that day).
-    while sum(hard_caps.get(d, 15) for d in use_for_rooms) < total_beds:
-        added = False
-        for overflow_doc in overflow_order:
-            if overflow_doc in doctors_list and overflow_doc not in use_for_rooms:
-                use_for_rooms.append(overflow_doc)
-                hard_caps[overflow_doc] = max(1, int(doctor_max_patients.get(overflow_doc, 15)))
-                added = True
-                break
-        if not added:
-            break
+    # Locked/manual-only overflow docs must still keep exactly their rooms.
+    for doc in overflow_order:
+        if doc in doctors_list and doc not in use_for_rooms:
+            if locked_preferences.get(doc, False) or manual_preferences.get(doc):
+                use_for_rooms.append(doc)
+                hard_caps[doc] = max(1, int(doctor_max_patients.get(doc, 15)))
 
+    has_capped_regular = any(d in custom_cap_docs for d in initial_regular_pool)
+    active_overflow_docs = [d for d in overflow_order if d in doctors_list and not forced_ward_preferences.get(d, False)]
     no_room_docs = [d for d in doctors_list if d not in use_for_rooms]
     locked_doctors = {d for d in use_for_rooms if locked_preferences.get(d, False)}
 
     # --- 1. TARGET CALCULATION (equal load, respect 15 where possible) ---
     targets = {d: 0 for d in doctors_list}
-    base = total_beds // len(use_for_rooms)
-    rem = total_beds % len(use_for_rooms)
-    ordered_for_target = sorted(use_for_rooms, key=lambda d: (doctor_priorities.get(d, 100), d))
+    base = total_beds // len(initial_regular_pool)
+    rem = total_beds % len(initial_regular_pool)
+    ordered_for_target = sorted(initial_regular_pool, key=lambda d: (doctor_priorities.get(d, 100), d))
     for i, doc in enumerate(ordered_for_target):
         targets[doc] = base + (1 if i < rem else 0)
+    for doc in use_for_rooms:
+        if doc not in targets:
+            targets[doc] = 0
 
     # --- 2. PREFERENCIE (MANUAL + LOCKED) ---
     for doc, nums in manual_preferences.items():
@@ -432,7 +417,7 @@ def distribute_rooms(
 
     # --- 3. KONTINUITA (PREVIOUS) ---
     if previous_assignments:
-        for doc in use_for_rooms:
+        for doc in initial_regular_pool:
             if doc in locked_doctors:
                 continue
             if doc in previous_assignments:
@@ -450,28 +435,52 @@ def distribute_rooms(
 
     # --- 4. DOROVNÁVANIE ---
     while available_rooms:
-        unlocked = [d for d in use_for_rooms if d not in locked_doctors]
-        if not unlocked:
-            unlocked = list(use_for_rooms)
+        regular_unlocked = [d for d in initial_regular_pool if d not in locked_doctors]
 
-        overflow_docs = [d for d in unlocked if d not in initial_use_for_rooms]
-        unlimited_base_docs = [d for d in initial_use_for_rooms if d in unlocked and d not in custom_cap_docs]
-        overflow_gate_open = (not unlimited_base_docs) or all(current_beds[d] >= 15 for d in unlimited_base_docs)
-        if not overflow_gate_open and overflow_docs:
-            unlocked = [d for d in unlocked if d not in overflow_docs]
+        def pick_best_room(doc, room_pool):
+            if not room_pool:
+                return None
+            if assignment[doc]:
+                avgs = sum(r[0] for r in assignment[doc]) / len(assignment[doc])
+                return min(room_pool, key=lambda r: abs(r[0] - avgs))
+            return room_pool[0]
 
-        candidates = [d for d in unlocked if current_beds[d] < targets.get(d, 15) and current_beds[d] < hard_caps.get(d, 15)]
-        if not candidates:
-            # If caps are impossible to satisfy globally, finish assignment anyway.
-            candidates = [d for d in unlocked if current_beds[d] < targets.get(d, 15)]
-        if not candidates:
-            candidates = list(unlocked)
-        candidates.sort(key=lambda d: (current_beds[d], doctor_priorities.get(d, 100), d))
-        receiver = candidates[0]
-        best_room = available_rooms[0]
-        if assignment[receiver]:
-            avgs = sum(r[0] for r in assignment[receiver]) / len(assignment[receiver])
-            best_room = min(available_rooms, key=lambda r: abs(r[0] - avgs))
+        receiver = None
+        best_room = None
+
+        regular_candidates = [d for d in regular_unlocked if current_beds[d] < hard_caps.get(d, 15)]
+        regular_candidates.sort(key=lambda d: (current_beds[d], doctor_priorities.get(d, 100), d))
+        for doc in regular_candidates:
+            fitting = [r for r in available_rooms if current_beds[doc] + r[1] <= hard_caps.get(doc, 15)]
+            if fitting:
+                receiver = doc
+                best_room = pick_best_room(doc, fitting)
+                break
+
+        if receiver is None:
+            overflow_gate_open = has_capped_regular
+            if overflow_gate_open:
+                for doc in active_overflow_docs:
+                    if doc not in use_for_rooms:
+                        use_for_rooms.append(doc)
+                        hard_caps[doc] = max(1, int(doctor_max_patients.get(doc, 15)))
+                for doc in active_overflow_docs:
+                    if doc not in use_for_rooms or doc in locked_doctors:
+                        continue
+                    fitting = [r for r in available_rooms if current_beds[doc] + r[1] <= hard_caps.get(doc, 15)]
+                    if fitting:
+                        receiver = doc
+                        best_room = pick_best_room(doc, fitting)
+                        break
+
+        if receiver is None:
+            unlocked = [d for d in use_for_rooms if d not in locked_doctors]
+            if not unlocked:
+                unlocked = list(use_for_rooms)
+            unlocked.sort(key=lambda d: (current_beds[d], doctor_priorities.get(d, 100), d))
+            receiver = unlocked[0]
+            best_room = pick_best_room(receiver, available_rooms)
+
         assignment[receiver].append(best_room)
         current_beds[receiver] += best_room[1]
         available_rooms.remove(best_room)
@@ -725,7 +734,8 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
                 manual_rooms,
                 doctor_priorities=doctor_priorities,
                 doctor_max_patients=manual_max_patients,
-                locked_preferences=locked_rooms
+                locked_preferences=locked_rooms,
+                forced_ward_preferences=force_ward
             )
             last_day_assignments = room_raw_map
             if save_hist: history[date_key] = room_raw_map
