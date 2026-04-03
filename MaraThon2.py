@@ -6,6 +6,7 @@ import os
 import requests
 import io
 import smtplib
+import logging
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
@@ -32,6 +33,7 @@ PRIVATE_CALENDAR_URL = "https://calendar.google.com/calendar/ical/fntnonk%40gmai
 GIST_FILENAME_CONFIG = "hospital_config_v26.json"
 GIST_FILENAME_HISTORY = "room_history_v26.json"
 REQUEST_TIMEOUT_SECONDS = 15
+logger = logging.getLogger(__name__)
 
 ROOMS_LIST = [
     (1, 3), (2, 3), (3, 3), (4, 3), (5, 3),
@@ -91,7 +93,8 @@ def get_gist_id(filename):
         resp.raise_for_status()
         for gist in resp.json():
             if filename in gist['files']: return gist['id']
-    except: pass
+    except requests.RequestException as exc:
+        logger.warning("Failed to list gists for %s: %s", filename, exc)
     return None
 
 def load_data_from_gist(filename):
@@ -105,7 +108,9 @@ def load_data_from_gist(filename):
         resp.raise_for_status()
         content = resp.json()['files'][filename]['content']
         return json.loads(content)
-    except: return None
+    except (requests.RequestException, KeyError, json.JSONDecodeError) as exc:
+        logger.warning("Failed to load gist %s: %s", filename, exc)
+        return None
 
 def save_data_to_gist(filename, data):
     if "github" not in st.secrets: return
@@ -118,9 +123,14 @@ def save_data_to_gist(filename, data):
             "public": False,
             "files": { filename: {"content": json.dumps(data, ensure_ascii=False, indent=2)} }
         }
-        if gist_id: requests.patch(f"https://api.github.com/gists/{gist_id}", json=payload, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
-        else: requests.post("https://api.github.com/gists", json=payload, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
-    except: pass
+        if gist_id:
+            resp = requests.patch(f"https://api.github.com/gists/{gist_id}", json=payload, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
+        else:
+            resp = requests.post("https://api.github.com/gists", json=payload, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
+        resp.raise_for_status()
+    except (requests.RequestException, KeyError, TypeError, ValueError) as exc:
+        logger.warning("Failed to save gist %s: %s", filename, exc)
+        st.warning(f"Nepodarilo sa uložiť {filename} do Gistu. Zostáva uložené len lokálne.")
 
 def _load_data(gist_filename, local_filename, default_factory):
     data = load_data_from_gist(gist_filename)
@@ -128,7 +138,8 @@ def _load_data(gist_filename, local_filename, default_factory):
     if os.path.exists(local_filename):
         try:
             with open(local_filename, 'r', encoding='utf-8') as f: return json.load(f)
-        except: pass
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Failed to load local data from %s: %s", local_filename, exc)
     return default_factory()
 
 def load_config():
@@ -166,13 +177,17 @@ def load_history(): return _load_data(GIST_FILENAME_HISTORY, HISTORY_FILE, lambd
 def save_config(config):
     try: 
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f: json.dump(config, f, ensure_ascii=False, indent=2)
-    except: pass
+    except OSError as exc:
+        logger.warning("Failed to save config locally: %s", exc)
+        st.warning("Nepodarilo sa uložiť konfiguráciu lokálne.")
     save_data_to_gist(GIST_FILENAME_CONFIG, config)
 
 def save_history(history):
     try: 
         with open(HISTORY_FILE, 'w', encoding='utf-8') as f: json.dump(history, f, ensure_ascii=False, indent=2)
-    except: pass
+    except OSError as exc:
+        logger.warning("Failed to save history locally: %s", exc)
+        st.warning("Nepodarilo sa uložiť históriu lokálne.")
     save_data_to_gist(GIST_FILENAME_HISTORY, history)
 
 def get_default_config():
@@ -611,7 +626,20 @@ def get_ical_events(start_date, end_date):
                 absences.setdefault(curr.strftime('%Y-%m-%d'), {})[name] = typ
                 curr += timedelta(days=1)
         return absences
-    except: return {}
+    except requests.RequestException as exc:
+        logger.warning("Failed to download calendar feed: %s", exc)
+        st.warning("Kalendár neprítomností sa nepodarilo stiahnuť.")
+        return {}
+    except Exception as exc:
+        logger.warning("Failed to parse calendar feed: %s", exc)
+        st.warning("Kalendár neprítomností sa nepodarilo spracovať.")
+        return {}
+
+def _get_schedule_range_labels(df):
+    if len(df.columns) >= 2:
+        return str(df.columns[1]), str(df.columns[-1])
+    fallback = str(df.columns[0]) if len(df.columns) == 1 else "Rozpis"
+    return fallback, fallback
 
 def build_absence_table(absences, start_d):
     # Oprava typu vstupu
@@ -884,17 +912,20 @@ def create_display_df(dates, data_grid, all_doctors, doctors_info, motto, config
 
 def create_excel_report(df):
     output = io.BytesIO()
+    range_start, range_end = _get_schedule_range_labels(df)
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, header=False, sheet_name="Rozpis")
         ws = writer.sheets['Rozpis']
         bold, center, thin = Font(bold=True), Alignment(horizontal="center", vertical="center", wrap_text=True), Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
-        ws.cell(1, 1, f"Rozpis prác Onkologická klinika {df.columns[1]} - {df.columns[-1]}").font = bold
+        ws.cell(1, 1, f"Rozpis prác Onkologická klinika {range_start} - {range_end}").font = bold
         ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(df.columns))
         ws['A1'].alignment = center
-        for r, row in enumerate(df.iterrows(), 2):
-            is_header = row[1][0] in ["Oddelenie", "Konziliárna amb", "RT ambulancie", "Chemo amb", "Disp. Ambulancia", "RTG Terapia"]
-            is_motto = (row[1][0] == st.session_state.get('motto', 'Motto'))
-            for c, val in enumerate(row[1], 1):
+        section_headers = {"Oddelenie", "Konziliárna amb", "RT ambulancie", "Chemo amb", "Disp. Ambulancia", "RTG Terapia"}
+        for r, (_, row) in enumerate(df.iterrows(), 2):
+            first_cell = str(row.iloc[0]) if len(row) else ""
+            is_header = first_cell in section_headers
+            is_motto = first_cell == st.session_state.get('motto', 'Motto')
+            for c, val in enumerate(row.tolist(), 1):
                 cell = ws.cell(r, c, val)
                 cell.border = thin
                 cell.alignment = center
@@ -911,6 +942,7 @@ def create_excel_report(df):
 def create_pdf_report(df, motto, title_prefix="Rozpis prác"):
     buffer = io.BytesIO()
     font_name = setup_pdf_fonts()
+    range_start, range_end = _get_schedule_range_labels(df)
     doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), rightMargin=10, leftMargin=10, topMargin=10, bottomMargin=10)
     styles = getSampleStyleSheet()
     styles['Title'].fontName = font_name
@@ -946,9 +978,11 @@ def create_pdf_report(df, motto, title_prefix="Rozpis prác"):
     else:
         # Klasicky rozpis
         data = [[Paragraph(str(c), ParagraphStyle('H', parent=styles['Normal'], fontName=font_name, fontSize=8, alignment=1)) for c in df.columns]]
+        section_headers = {"Oddelenie", "Konziliárna amb", "RT ambulancie", "Chemo amb", "Disp. Ambulancia", "RTG Terapia"}
         for _, row in df.iterrows():
             row_data = []
-            is_motto = (row[0] == (motto or "Motto"))
+            first_cell = str(row.iloc[0]) if len(row) else ""
+            is_motto = first_cell == (motto or "Motto")
             for i, val in enumerate(row.values):
                 txt = str(val) if val else ""
                 if is_motto and i==0: 
@@ -961,16 +995,17 @@ def create_pdf_report(df, motto, title_prefix="Rozpis prác"):
         
         t = Table(data, colWidths=[130] + [135]*(len(df.columns)-1))
         style = TableStyle([('GRID', (0,0), (-1,-1), 0.5, colors.black), ('VALIGN', (0,0), (-1,-1), 'MIDDLE'), ('BACKGROUND', (0,0), (-1,0), colors.grey)])
-        for i, row in enumerate(df.iterrows()):
-            if row[1][0] in ["Oddelenie", "Konziliárna amb", "RT ambulancie", "Chemo amb", "Disp. Ambulancia", "RTG Terapia"]:
+        for i, (_, row) in enumerate(df.iterrows()):
+            first_cell = str(row.iloc[0]) if len(row) else ""
+            if first_cell in section_headers:
                 style.add('BACKGROUND', (0, i+1), (-1, i+1), colors.lightgrey)
-            if row[1][0] == (motto or "Motto"):
+            if first_cell == (motto or "Motto"):
                 style.add('SPAN', (0, i+1), (-1, i+1))
                 style.add('BACKGROUND', (0, i+1), (-1, i+1), colors.whitesmoke)
                 style.add('ALIGN', (0, i+1), (-1, i+1), 'CENTER')
         t.setStyle(style)
         
-        doc.build([Paragraph(f"{title_prefix} {df.columns[1]} - {df.columns[-1]}", styles['Title']), t])
+        doc.build([Paragraph(f"{title_prefix} {range_start} - {range_end}", styles['Title']), t])
         
     buffer.seek(0)
     return buffer.getvalue()
@@ -1318,8 +1353,9 @@ if mode == "🚀 Generovať rozpis":
         export_df = edited_df.copy()
         xlsx = create_excel_report(export_df)
         pdf = create_pdf_report(export_df, st.session_state.motto)
+        range_start, range_end = _get_schedule_range_labels(export_df)
         
-        fn = f"Rozpis_{export_df.columns[1]}_{export_df.columns[-1]}"
+        fn = f"Rozpis_{range_start}_{range_end}"
         c1, c2 = st.columns(2)
         c1.download_button("⬇️ XLSX", xlsx, f"{fn}.xlsx")
         c2.download_button("⬇️ PDF", pdf, f"{fn}.pdf", mime="application/pdf")
