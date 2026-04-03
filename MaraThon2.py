@@ -4,7 +4,6 @@ from datetime import datetime, timedelta, date
 import json
 import os
 import requests
-from ics import Calendar
 import io
 import smtplib
 from email.mime.multipart import MIMEMultipart
@@ -542,16 +541,64 @@ def distribute_rooms(
              
     return result_text, result_raw
 
+def _unfold_ical_lines(ical_text):
+    unfolded = []
+    for line in ical_text.splitlines():
+        if line.startswith((" ", "\t")) and unfolded:
+            unfolded[-1] += line[1:]
+        else:
+            unfolded.append(line)
+    return unfolded
+
+def _parse_ical_datetime(raw_value):
+    value = raw_value.strip()
+    formats = (
+        "%Y%m%d",
+        "%Y%m%dT%H%M%S",
+        "%Y%m%dT%H%M",
+        "%Y%m%dT%H%M%SZ",
+        "%Y%m%dT%H%MZ",
+    )
+    for fmt in formats:
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    return None
+
+def _iter_ical_events(ical_text):
+    event = None
+    for line in _unfold_ical_lines(ical_text):
+        if line == "BEGIN:VEVENT":
+            event = {}
+            continue
+        if line == "END:VEVENT":
+            if event:
+                yield event
+            event = None
+            continue
+        if event is None or ":" not in line:
+            continue
+
+        key, value = line.split(":", 1)
+        prop_name = key.split(";", 1)[0].upper()
+        if prop_name in {"SUMMARY", "DTSTART", "DTEND"}:
+            event[prop_name] = value.strip()
+
 def get_ical_events(start_date, end_date):
     try:
         response = requests.get(PRIVATE_CALENDAR_URL, timeout=REQUEST_TIMEOUT_SECONDS)
         response.raise_for_status()
-        c = Calendar(response.text)
         absences = {}
-        for event in c.events:
-            ev_start, ev_end = event.begin.date(), event.end.date()
+        for event in _iter_ical_events(response.text):
+            dt_start = _parse_ical_datetime(event.get("DTSTART", ""))
+            dt_end = _parse_ical_datetime(event.get("DTEND", ""))
+            raw = event.get("SUMMARY", "").strip()
+            if not dt_start or not dt_end or not raw:
+                continue
+
+            ev_start, ev_end = dt_start.date(), dt_end.date()
             if ev_end < start_date.date() or ev_start > end_date.date(): continue
-            raw = event.name.strip()
             name, typ = raw, "Dovolenka"
             if raw.upper().endswith('PN'): typ, name = "PN", raw[:-2].rstrip(' -')
             elif raw.upper().endswith('VZ'): typ, name = "Vzdelávanie", raw[:-2].rstrip(' -')
