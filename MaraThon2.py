@@ -148,6 +148,9 @@ def load_config():
     if 'closures' not in config:
         config['closures'] = {}
         changed = True
+    if 'week_start_day' not in config:
+        config['week_start_day'] = 3
+        changed = True
     
     # Pridanie sekcie pre absencie, ak chyba
     if 'email_settings_absences' not in config:
@@ -193,7 +196,8 @@ def save_history(history):
 def get_default_config():
     return {
         "total_beds": 42,
-        "closures": {}, 
+        "week_start_day": 3,
+        "closures": {},
         "email_settings": { "default_to": "", "default_subject": "Rozpis služieb", "default_body": "Dobrý deň,\nv prílohe rozpis." },
         "email_settings_absences": { "default_to": "", "default_subject": "Prehľad neprítomností", "default_body": "Dobrý deň,\nv prílohe posielam prehľad neprítomností." },
         "ambulancie": {
@@ -707,15 +711,16 @@ def build_absence_table(absences, start_d):
 
     return pd.DataFrame(grouped_rows)
 
-def generate_data_structure(config, absences, start_date, save_hist=True):
+def generate_data_structure(config, absences, start_date, save_hist=True, extra_closures=None):
     days_map = {0: "Pondelok", 1: "Utorok", 2: "Streda", 3: "Stvrtok", 4: "Piatok"}
+    week_start_day = config.get('week_start_day', 3)
     weekday = start_date.weekday()
-    thursday = start_date + timedelta(days=(3 - weekday) % 7)
+    week_anchor = start_date + timedelta(days=(week_start_day - weekday) % 7)
     dates, data_grid = [], {}
     all_doctors, doctors_info = [], {}
     week_dates_str = []
     for i in range(7):
-        d = thursday + timedelta(days=i)
+        d = week_anchor + timedelta(days=i)
         if d.weekday() < 5: week_dates_str.append(d.strftime('%Y-%m-%d'))
 
     for d_name, props in config['lekari'].items():
@@ -729,16 +734,19 @@ def generate_data_structure(config, absences, start_date, save_hist=True):
     all_doctors.sort()
     doctor_priorities = {d: config['lekari'].get(d, {}).get('priority', 100) for d in all_doctors}
     history = load_history()
-    last_day_assignments = history.get((thursday - timedelta(days=1)).strftime('%Y-%m-%d'), {})
+    last_day_assignments = history.get((week_anchor - timedelta(days=1)).strftime('%Y-%m-%d'), {})
     manual_all = st.session_state.get("manual_core", {})
-    closures = config.get('closures', {})
+    closures = {**config.get('closures', {})}
+    if extra_closures:
+        for dk, vals in extra_closures.items():
+            closures[dk] = list(set(closures.get(dk, []) + vals))
     
     dates_raw = []
     start_key = start_date.strftime('%Y-%m-%d')
     workday_index = 0
 
     for i in range(7):
-        curr_date = thursday + timedelta(days=i)
+        curr_date = week_anchor + timedelta(days=i)
         day_name = days_map.get(curr_date.weekday())
         if not day_name: continue
         date_str = curr_date.strftime('%d.%m.%Y')
@@ -1061,6 +1069,49 @@ def group_closures_to_intervals(closures_dict):
     intervals.append((curr_start, curr_end, curr_val))
     return intervals
 
+# --- SLOVAK PUBLIC HOLIDAYS ---
+
+def get_slovak_holidays(year):
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = ((h + l - 7 * m + 114) % 31) + 1
+    easter = date(year, month, day)
+    return {
+        date(year, 1, 1):  "Nový rok",
+        date(year, 1, 6):  "Traja králi",
+        easter - timedelta(days=2): "Veľký piatok",
+        easter + timedelta(days=1): "Veľkonočný pondelok",
+        date(year, 5, 1):  "Sviatok práce",
+        date(year, 5, 8):  "Deň víťazstva nad fašizmom",
+        date(year, 7, 5):  "Sviatok sv. Cyrila a Metoda",
+        date(year, 8, 29): "Výročie SNP",
+        date(year, 9, 1):  "Deň Ústavy SR",
+        date(year, 9, 15): "Sviatok Panny Márie Sedembolestnej",
+        date(year, 11, 1): "Sviatok všetkých svätých",
+        date(year, 11, 17):"Deň boja za slobodu a demokraciu",
+        date(year, 12, 24):"Štedrý deň",
+        date(year, 12, 25):"Prvý sviatok vianočný",
+        date(year, 12, 26):"Druhý sviatok vianočný",
+    }
+
+def get_holidays_in_range(start_d, end_d):
+    result = {}
+    for yr in {start_d.year, end_d.year}:
+        result.update(get_slovak_holidays(yr))
+    return {d: name for d, name in result.items() if start_d <= d <= end_d}
+
+
 # --- MAIN APP ---
 st.set_page_config(page_title="Rozpis FN Trenčín", layout="wide")
 st.title("🏥 Rozpis prác - Onkologická klinika FN Trenčín")
@@ -1076,6 +1127,20 @@ if mode == "🚀 Generovať rozpis":
     c1, c2 = st.columns(2)
     st.session_state.motto = c1.text_input("📢 Motto:", value=st.session_state.motto, placeholder="...")
     start_d = c2.date_input("Začiatok:", datetime.now())
+
+    # --- Holiday detection ---
+    _wsd = st.session_state.config.get('week_start_day', 3)
+    _anchor = start_d + timedelta(days=(_wsd - start_d.weekday()) % 7)
+    _schedule_days = [_anchor + timedelta(days=i) for i in range(7) if (_anchor + timedelta(days=i)).weekday() < 5]
+    _hols = get_holidays_in_range(_schedule_days[0], _schedule_days[-1]) if _schedule_days else {}
+    if _hols:
+        st.warning("🎉 Štátne sviatky v tomto období:")
+        for _hd, _hn in sorted(_hols.items()):
+            st.session_state.setdefault(f"hol_work_{_hd}", False)
+            st.checkbox(
+                f"{_hd.strftime('%d.%m.%Y')} – {_hn} — generovať rozpis?",
+                key=f"hol_work_{_hd}"
+            )
 
     with st.expander("📅 Výnimky", expanded=True):
         if st.session_state.config.get('closures'):
@@ -1126,7 +1191,8 @@ if mode == "🚀 Generovať rozpis":
     ]
 
     if st.button("📥 Načítať izby z minulého týždňa"):
-        curr_week_start = start_d + timedelta(days=(3 - start_d.weekday()) % 7)
+        _wsd = st.session_state.config.get('week_start_day', 3)
+        curr_week_start = start_d + timedelta(days=(_wsd - start_d.weekday()) % 7)
         prev_cycle_last_day_key = (curr_week_start - timedelta(days=1)).strftime('%Y-%m-%d')
         history_for_load = load_history()
         prev_rooms = history_for_load.get(prev_cycle_last_day_key, {})
@@ -1266,7 +1332,11 @@ if mode == "🚀 Generovať rozpis":
         with st.spinner("..."):
             end_d = start_d + timedelta(days=14)
             ab = get_ical_events(datetime.combine(start_d, datetime.min.time()), datetime.combine(end_d, datetime.min.time()))
-            ds, g, d, di, raw_dates = generate_data_structure(st.session_state.config, ab, start_d)
+            _hols_extra = {}
+            for _hd in _hols:
+                if not st.session_state.get(f"hol_work_{_hd}", False):
+                    _hols_extra[_hd.strftime('%Y-%m-%d')] = ["ODDELENIE (Celé)"]
+            ds, g, d, di, raw_dates = generate_data_structure(st.session_state.config, ab, start_d, extra_closures=_hols_extra)
             st.session_state.dates_raw = raw_dates
             st.session_state.df_generated = create_display_df(ds, g, d, di, st.session_state.motto, st.session_state.config)
             st.session_state.df_generated.columns = ["Sekcia / Dátum"] + ds
@@ -1462,7 +1532,19 @@ elif mode == "⚙️ Nastavenia lekárov":
 
 elif mode == "🏥 Nastavenia ambulancií":
     st.header("Ambulancie")
-    sel = st.selectbox("Vyber:", list(st.session_state.config['ambulancie'].keys()))
+
+    st.subheader("⚙️ Všeobecné nastavenia")
+    _day_names = ["Pondelok", "Utorok", "Streda", "Štvrtok", "Piatok"]
+    _cur_wsd = st.session_state.config.get('week_start_day', 3)
+    _new_wsd = st.selectbox("Začiatok týždenného cyklu:", _day_names, index=_cur_wsd)
+    _new_wsd_idx = _day_names.index(_new_wsd)
+    if _new_wsd_idx != _cur_wsd:
+        st.session_state.config['week_start_day'] = _new_wsd_idx
+        save_config(st.session_state.config)
+        st.success(f"Cyklus začína od: {_new_wsd}")
+    st.markdown("---")
+
+    sel = st.selectbox("Vyber ambulanciu:", list(st.session_state.config['ambulancie'].keys()))
     curr = st.session_state.config['ambulancie'][sel]
     if isinstance(curr['priority'], list):
         txt = st.text_area("Priority:", ", ".join(curr['priority']))
