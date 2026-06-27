@@ -457,6 +457,8 @@ def get_ical_events(start_date, end_date):
             raw = event.get("SUMMARY", "").strip()
             if not dt_start or not dt_end or not raw:
                 continue
+            if raw.lower().startswith('sluzi:'):
+                continue
 
             ev_start, ev_end = dt_start.date(), dt_end.date()
             if ev_end < start_date.date() or ev_start > end_date.date():

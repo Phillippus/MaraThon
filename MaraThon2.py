@@ -26,6 +26,12 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 import urllib.request
 
+try:
+    import google.generativeai as genai
+    _GEMINI_AVAILABLE = True
+except ImportError:
+    _GEMINI_AVAILABLE = False
+
 # --- KONFIGURÁCIA ---
 CONFIG_FILE = 'hospital_config.json'
 HISTORY_FILE = 'room_history.json'
@@ -615,6 +621,8 @@ def get_ical_events(start_date, end_date):
             raw = event.get("SUMMARY", "").strip()
             if not dt_start or not dt_end or not raw:
                 continue
+            if raw.lower().startswith('sluzi:'):
+                continue
 
             ev_start, ev_end = dt_start.date(), dt_end.date()
             if ev_end < start_date.date() or ev_start > end_date.date(): continue
@@ -1111,6 +1119,55 @@ def get_holidays_in_range(start_d, end_d):
         result.update(get_slovak_holidays(yr))
     return {d: name for d, name in result.items() if start_d <= d <= end_d}
 
+# --- GEMINI AI REVIEW ---
+
+def review_schedule_with_gemini(df, absences_df, config):
+    if not _GEMINI_AVAILABLE:
+        return None, "Knižnica google-generativeai nie je nainštalovaná."
+    if "gemini" not in st.secrets:
+        return None, "Chýba sekcia [gemini] v secrets."
+
+    try:
+        genai.configure(api_key=st.secrets["gemini"]["api_key"])
+        model = genai.GenerativeModel("gemini-2.0-flash")
+    except Exception as exc:
+        return None, f"Chyba pri inicializácii Gemini: {exc}"
+
+    schedule_text = df.to_string(index=False)
+
+    absences_text = ""
+    if absences_df is not None and not absences_df.empty:
+        absences_text = "\n\nNeprítomnosti v tomto období:\n" + absences_df.to_string(index=False)
+
+    doctor_rules = []
+    for doc, props in config.get("lekari", {}).items():
+        if props.get("active", True):
+            moze = ", ".join(props.get("moze", []))
+            doctor_rules.append(f"  - {doc}: môže pracovať na [{moze}]")
+    rules_text = "\n".join(doctor_rules)
+
+    prompt = f"""Si asistent kontrolujúci týždenný rozpis práce onkologickej kliniky FN Trenčín.
+Každý lekár má povolené pracoviská. Skontroluj nasledujúci rozpis a identifikuj:
+1. Neobsadené pracoviská (hodnota ??? alebo NEOBSADENÉ)
+2. Lekárov priradených na pracovisko, na ktorom nemajú povolenie
+3. Dni s nerovnomerným zaťažením alebo potenciálnymi problémami
+4. Akékoľvek iné anomálie
+
+Povolenia lekárov:
+{rules_text}
+
+Rozpis:
+{schedule_text}
+{absences_text}
+
+Odpovedaj stručne v slovenčine. Ak je rozpis v poriadku, napíš to. Inak vypíš konkrétne problémy formou zoznamu."""
+
+    try:
+        response = model.generate_content(prompt)
+        return response.text, None
+    except Exception as exc:
+        return None, f"Chyba Gemini API: {exc}"
+
 
 # --- MAIN APP ---
 st.set_page_config(page_title="Rozpis FN Trenčín", layout="wide")
@@ -1447,6 +1504,17 @@ if mode == "🚀 Generovať rozpis":
                     st.success(f"Rozpis odoslaný na {to}")
                 else:
                      st.error(f"Chyba pri odosielaní rozpisu: {err}")
+
+        with st.expander("🤖 AI kontrola rozpisu (Gemini)"):
+            st.caption("Gemini skontroluje rozpis na neobsadené pracoviská, porušenia povolení a iné anomálie.")
+            if st.button("🔍 Spustiť AI kontrolu"):
+                with st.spinner("Gemini analyzuje rozpis..."):
+                    absences_df_for_ai = st.session_state.get("absences_df", None)
+                    result, err = review_schedule_with_gemini(export_df, absences_df_for_ai, st.session_state.config)
+                if err:
+                    st.error(err)
+                else:
+                    st.markdown(result)
 
 elif mode == "⚙️ Nastavenia lekárov":
     st.header("Lekári")
