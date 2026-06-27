@@ -100,6 +100,22 @@ def load_config():
     if 'closures' not in config:
         config['closures'] = {}
         changed = True
+
+    # Obnovenie správneho poradia (ak boli omylom prehodené predch. migráciou)
+    _pr_prio = config.get('ambulancie', {}).get('Prijmova', {}).get('priority', [])
+    if isinstance(_pr_prio, list) and 'Kohutek' in _pr_prio and 'Bystricky' in _pr_prio:
+        ki, bi = _pr_prio.index('Kohutek'), _pr_prio.index('Bystricky')
+        if bi < ki:  # Bystricky je pred Kohutkom (nesprávne) → oprava
+            _pr_prio[ki], _pr_prio[bi] = _pr_prio[bi], _pr_prio[ki]
+            changed = True
+
+    _vd_prio = config.get('ambulancie', {}).get('Velka dispenzarna', {}).get('priority', [])
+    if isinstance(_vd_prio, list) and 'Vidulin' in _vd_prio and 'Stratena' in _vd_prio:
+        vi, si = _vd_prio.index('Vidulin'), _vd_prio.index('Stratena')
+        if vi < si:  # Vidulin je pred Stratenou (nesprávne) → oprava
+            _vd_prio[si], _vd_prio[vi] = _vd_prio[vi], _vd_prio[si]
+            changed = True
+
     if changed:
         save_config(config)
     return config
@@ -566,6 +582,22 @@ def generate_data_structure(config, absences, start_date):
             prio_list = amb_info['priority']
             if isinstance(prio_list, dict):
                 prio_list = prio_list.get(str(curr_date.weekday()), prio_list.get('default', []))
+
+            # Špeciálne pravidlo: Veľký + Malý dispenzár
+            # Ak sú voľné obe dispenzárne ambulancie A sú k dispozícii Vidulin aj Stratená
+            # → Vidulin ide na Veľký, Stratená zostáva na Malý.
+            if amb_name == "Velka dispenzarna":
+                mala_still_open = (
+                    "Mala dispenzarna" not in assigned_amb
+                    and day_name in config['ambulancie'].get("Mala dispenzarna", {}).get('dni', [])
+                )
+                if mala_still_open:
+                    cands_v = [d for d in prio_list if d in available and amb_name in config['lekari'][d].get('moze', [])]
+                    cands_m = [d for d in config['ambulancie']['Mala dispenzarna']['priority'] if d in available and 'Mala dispenzarna' in config['lekari'][d].get('moze', [])]
+                    if "Vidulin" in cands_v and "Stratena" in cands_m:
+                        assigned_amb[amb_name] = "Vidulin"
+                        available.remove("Vidulin")
+                        continue
 
             for doc in prio_list:
                 if doc in available and amb_name in config['lekari'][doc].get('moze', []):

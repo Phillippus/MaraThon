@@ -177,7 +177,30 @@ def load_config():
         if 'extra_dni' not in doctor_data:
             doctor_data['extra_dni'] = []
             changed = True
-        
+
+    # Obnovenie správneho poradia priorít (ak boli omylom prehodené predch. migráciou)
+    _konz_prio = config.get('ambulancie', {}).get('Konziliarna', {}).get('priority', [])
+    if isinstance(_konz_prio, list) and 'Kohutek' in _konz_prio and 'Bystricky' in _konz_prio:
+        ki, bi = _konz_prio.index('Kohutek'), _konz_prio.index('Bystricky')
+        if bi < ki:  # Bystricky je pred Kohutkom (nesprávne) → oprava
+            _konz_prio[ki], _konz_prio[bi] = _konz_prio[bi], _konz_prio[ki]
+            changed = True
+
+    _vd_prio = config.get('ambulancie', {}).get('Velka dispenzarna', {}).get('priority', [])
+    if isinstance(_vd_prio, list) and 'Vidulin' in _vd_prio and 'Stratena' in _vd_prio:
+        vi, si = _vd_prio.index('Vidulin'), _vd_prio.index('Stratena')
+        if vi < si:  # Vidulin je pred Stratenou (nesprávne) → oprava
+            _vd_prio[si], _vd_prio[vi] = _vd_prio[vi], _vd_prio[si]
+            changed = True
+
+    # Email default
+    if not config.get('email_settings', {}).get('default_to', ''):
+        config.setdefault('email_settings', {})['default_to'] = 'filip.kohutek@fntn.sk'
+        changed = True
+    if not config.get('email_settings_absences', {}).get('default_to', ''):
+        config.setdefault('email_settings_absences', {})['default_to'] = 'filip.kohutek@fntn.sk'
+        changed = True
+
     if changed: save_config(config)
     return config
 
@@ -204,8 +227,8 @@ def get_default_config():
         "total_beds": 42,
         "week_start_day": 3,
         "closures": {},
-        "email_settings": { "default_to": "", "default_subject": "Rozpis služieb", "default_body": "Dobrý deň,\nv prílohe rozpis." },
-        "email_settings_absences": { "default_to": "", "default_subject": "Prehľad neprítomností", "default_body": "Dobrý deň,\nv prílohe posielam prehľad neprítomností." },
+        "email_settings": { "default_to": "filip.kohutek@fntn.sk", "default_subject": "Rozpis služieb", "default_body": "Dobrý deň,\nv prílohe rozpis." },
+        "email_settings_absences": { "default_to": "filip.kohutek@fntn.sk", "default_subject": "Prehľad neprítomností", "default_body": "Dobrý deň,\nv prílohe posielam prehľad neprítomností." },
         "ambulancie": {
             "Konziliarna": { "dni": ["Pondelok", "Utorok", "Streda", "Stvrtok", "Piatok"], "priority": ["Kohutekova", "Kohutek", "Bystricky", "Zavrelova"] },
             "Velka dispenzarna": { "dni": ["Pondelok", "Utorok", "Streda", "Stvrtok", "Piatok"], "priority": ["Bocak", "Stratena", "Vidulin", "Kurisova", "Blahova", "Hrabosova", "Miklatkova", "Martinka"] },
@@ -827,10 +850,38 @@ def generate_data_structure(config, absences, start_date, save_hist=True, extra_
             if not cands:
                 assigned_amb[amb] = "NEOBSADENÉ"
                 continue
+
+            # Špeciálne pravidlo: Konziliarna + Chemo
+            # Ak sú voľní Bystrický aj Kohútek A zároveň je voľná aj niektorá Chemo
+            # ambulancia → Bystrický ide na Konziliarnu, Kohútek zostáva na Chemo.
+            if amb == "Konziliarna" and "Bystricky" in cands and "Kohutek" in cands:
+                chemo_still_open = any(
+                    c not in assigned_amb
+                    and day_name in config['ambulancie'].get(c, {}).get('dni', [])
+                    for c in ["Chemo 8A", "Chemo 8B", "Chemo 8C"]
+                )
+                if chemo_still_open:
+                    assigned_amb[amb] = "Bystricky"
+                    available.remove("Bystricky")
+                    continue
+
+            # Špeciálne pravidlo: Veľký + Malý dispenzár
+            # Ak sú voľné obe dispenzárne ambulancie A sú k dispozícii Vidulin aj Stratená
+            # → Vidulin ide na Veľký, Stratená zostáva na Malý.
+            if amb == "Velka dispenzarna" and "Vidulin" in cands and "Stratena" in cands:
+                mala_still_open = (
+                    "Mala dispenzarna" not in assigned_amb
+                    and day_name in config['ambulancie'].get("Mala dispenzarna", {}).get('dni', [])
+                )
+                if mala_still_open:
+                    assigned_amb[amb] = "Vidulin"
+                    available.remove("Vidulin")
+                    continue
+
             cands = sorted(
                 cands,
                 key=lambda d: (
-                    1 if d == "Bystricky" else 0,
+                    1 if (d == "Bystricky" and item['name'] != "Konziliarna") else 0,
                     doctor_priorities.get(d, 100),
                     item['candidates'].index(d)
                 )
