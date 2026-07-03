@@ -16,6 +16,7 @@ from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 from openpyxl.utils import get_column_letter
 import random
 import math
+import unicodedata
 
 # --- REPORTLAB PRE PDF + UNICODE ---
 from reportlab.lib import colors
@@ -645,6 +646,12 @@ def get_ical_events(start_date, end_date):
             if not dt_start or not dt_end or not raw:
                 continue
             if raw.lower().startswith('sluzi:'):
+                continue
+            _raw_noaccent = ''.join(
+                c for c in unicodedata.normalize('NFD', raw)
+                if unicodedata.category(c) != 'Mn'
+            ).lower()
+            if _raw_noaccent.startswith(('sluzi:', 'sluzby:', 'sluzba:')):
                 continue
 
             ev_start, ev_end = dt_start.date(), dt_end.date()
