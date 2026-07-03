@@ -55,7 +55,9 @@ def setup_pdf_fonts():
     if font_name in pdfmetrics.getRegisteredFontNames():
         return font_name
 
+    bundled_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
     font_path_candidates = [
+        os.path.join(bundled_dir, "DejaVuSans.ttf"),
         "/tmp/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/local/share/fonts/DejaVuSans.ttf",
@@ -63,12 +65,33 @@ def setup_pdf_fonts():
         "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
         "/System/Library/Fonts/Supplemental/Arial.ttf",
     ]
+    bold_path_candidates = [
+        os.path.join(bundled_dir, "DejaVuSans-Bold.ttf"),
+        "/tmp/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/local/share/fonts/DejaVuSans-Bold.ttf",
+    ]
+
+    def register_bold(regular_path):
+        bold_name = font_name + "-Bold"
+        for bold_path in bold_path_candidates:
+            if os.path.exists(bold_path):
+                try:
+                    pdfmetrics.registerFont(TTFont(bold_name, bold_path))
+                    break
+                except:
+                    pass
+        else:
+            # Žiadny bold variant nenájdený, použi rovnaký font aj pre bold text
+            pdfmetrics.registerFont(TTFont(bold_name, regular_path))
+        pdfmetrics.registerFontFamily(font_name, normal=font_name, bold=bold_name, italic=font_name, boldItalic=bold_name)
 
     for path in font_path_candidates:
         if not os.path.exists(path):
             continue
         try:
             pdfmetrics.registerFont(TTFont(font_name, path))
+            register_bold(path)
             return font_name
         except:
             pass
@@ -85,6 +108,7 @@ def setup_pdf_fonts():
             with open(download_target, "wb") as f:
                 f.write(content)
             pdfmetrics.registerFont(TTFont(font_name, download_target))
+            register_bold(download_target)
             return font_name
         except:
             pass
