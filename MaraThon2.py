@@ -385,8 +385,10 @@ def parse_manual_day_preferences(day_pref, workday_index=None, date_key=None):
     manual_max_patients = {}
     locked_rooms = {}
     force_ward = {}
+    force_rt_amb = {}
+    force_rt_odd = {}
     if not isinstance(day_pref, dict):
-        return manual_rooms, manual_max_patients, locked_rooms, force_ward
+        return manual_rooms, manual_max_patients, locked_rooms, force_ward, force_rt_amb, force_rt_odd
 
     for doc, val in day_pref.items():
         if isinstance(val, dict):
@@ -396,6 +398,8 @@ def parse_manual_day_preferences(day_pref, workday_index=None, date_key=None):
             max_patients_by_dates = val.get("max_patients_by_dates", None)
             locked = bool(val.get("locked_rooms", False))
             force_to_ward = bool(val.get("force_to_ward", False))
+            force_to_rt_amb = bool(val.get("force_rt_amb", False))
+            force_to_rt_odd = bool(val.get("force_rt_odd", False))
         else:
             rooms = val
             max_patients = None
@@ -403,6 +407,8 @@ def parse_manual_day_preferences(day_pref, workday_index=None, date_key=None):
             max_patients_by_dates = None
             locked = False
             force_to_ward = False
+            force_to_rt_amb = False
+            force_to_rt_odd = False
 
         if not isinstance(rooms, list):
             rooms = []
@@ -443,8 +449,10 @@ def parse_manual_day_preferences(day_pref, workday_index=None, date_key=None):
                 pass
         locked_rooms[doc] = locked
         force_ward[doc] = force_to_ward
+        force_rt_amb[doc] = force_to_rt_amb
+        force_rt_odd[doc] = force_to_rt_odd
 
-    return manual_rooms, manual_max_patients, locked_rooms, force_ward
+    return manual_rooms, manual_max_patients, locked_rooms, force_ward, force_rt_amb, force_rt_odd
 
 def distribute_rooms(
     doctors_list,
@@ -706,6 +714,23 @@ def get_ical_events(start_date, end_date):
         st.warning("Kalendár neprítomností sa nepodarilo spracovať.")
         return {}
 
+def detect_kohutek_vacation_weeks(config, absences_wide, start_d, doctor="Kohutek", max_weeks=8):
+    """Vráti počet po sebe idúcich týždňových cyklov (od start_d) a ich začiatky (anchor dátumy),
+    v ktorých má daný lekár aspoň jeden deň neprítomnosti. Cyklus bez neprítomnosti sériu ukončí."""
+    week_start_day = config.get('week_start_day', 3)
+    weekday = start_d.weekday()
+    week_anchor = start_d + timedelta(days=(week_start_day - weekday) % 7)
+
+    week_starts = []
+    for w in range(max_weeks):
+        anchor = week_anchor + timedelta(weeks=w)
+        workdays = [anchor + timedelta(days=i) for i in range(7) if (anchor + timedelta(days=i)).weekday() < 5]
+        has_absence = any(doctor in absences_wide.get(d.strftime('%Y-%m-%d'), {}) for d in workdays)
+        if not has_absence:
+            break
+        week_starts.append(anchor)
+    return len(week_starts), week_starts
+
 def _get_schedule_range_labels(df):
     if len(df.columns) >= 2:
         return str(df.columns[1]), str(df.columns[-1])
@@ -823,13 +848,13 @@ def generate_data_structure(config, absences, start_date, save_hist=True, extra_
         daily_pref = manual_all.get(date_key, {})
         if not daily_pref:
             daily_pref = manual_all.get(start_key, {})
-        manual_rooms, manual_max_patients, locked_rooms, force_ward = parse_manual_day_preferences(
+        manual_rooms, manual_max_patients, locked_rooms, force_ward, force_rt_amb, force_rt_odd = parse_manual_day_preferences(
             daily_pref,
             workday_index=workday_index,
             date_key=date_key
         )
         forced_ward_docs = {doc for doc, forced in force_ward.items() if forced and doc in all_doctors}
-        
+
         available = [
             d for d in all_doctors
             if is_doctor_active_on_date(config['lekari'][d], date_key)
@@ -837,6 +862,15 @@ def generate_data_structure(config, absences, start_date, save_hist=True, extra_
             and day_name not in config['lekari'][d].get('nepracuje', [])
         ]
         presence_grid[date_str] = set(available)
+
+        # RT odd má prednosť pred RT amb, ak sú omylom zakliknuté obe naraz.
+        forced_rt_odd_docs = {doc for doc, forced in force_rt_odd.items() if forced and doc in available}
+        forced_rt_amb_docs = {
+            doc for doc, forced in force_rt_amb.items()
+            if forced and doc in available and doc not in forced_rt_odd_docs
+        }
+        available = [d for d in available if d not in forced_rt_odd_docs and d not in forced_rt_amb_docs]
+
         assigned_amb = {}
         
         for doc in list(available):
@@ -923,6 +957,16 @@ def generate_data_structure(config, absences, start_date, save_hist=True, extra_
             assigned_amb[amb] = chosen
             available.remove(chosen)
 
+        # Force RT amb: nasilne pridelenie na tu z Radio 2A/2B, ktora dnes nie je obsadena.
+        fillable_rt_amb_values = {"NEOBSADENÉ", "---", ""}
+        for doc in forced_rt_amb_docs:
+            target = next(
+                (amb for amb in ["Radio 2A", "Radio 2B"] if assigned_amb.get(amb, "") in fillable_rt_amb_values),
+                None
+            )
+            if target:
+                assigned_amb[target] = doc
+
         # Na 2A/2B staci obsadit aspon jednu RT ambulanciu.
         non_active_values = {"NEOBSADENÉ", "ZATVORENÉ", "---", ""}
         r2a = assigned_amb.get("Radio 2A", "")
@@ -964,6 +1008,7 @@ def generate_data_structure(config, absences, start_date, save_hist=True, extra_
                 data_grid[date_str][doc] = ""
                 continue
             if doc in day_absences: data_grid[date_str][doc] = day_absences[doc]
+            elif doc in forced_rt_odd_docs: data_grid[date_str][doc] = "RT oddelenie"
             elif doc in room_text_map: data_grid[date_str][doc] = room_text_map[doc]
             else:
                 my = [a for a, d in assigned_amb.items() if d == doc]
@@ -1102,7 +1147,7 @@ def _build_grid_table_flowable(df, font_name, motto=None):
     t.setStyle(style)
     return t
 
-def create_pdf_report(df, motto, title_prefix="Rozpis prác", extra_df=None, extra_title=None):
+def create_pdf_report(df, motto, title_prefix="Rozpis prác", extra_pages=None):
     buffer = io.BytesIO()
     font_name = setup_pdf_fonts()
     range_start, range_end = _get_schedule_range_labels(df)
@@ -1143,9 +1188,12 @@ def create_pdf_report(df, motto, title_prefix="Rozpis prác", extra_df=None, ext
         t = _build_grid_table_flowable(df, font_name, motto)
         flowables = [Paragraph(f"{title_prefix} {range_start} - {range_end}", styles['Title']), t]
 
-        if extra_df is not None and not extra_df.empty:
-            extra_t = _build_grid_table_flowable(extra_df, font_name)
-            flowables += [PageBreak(), Paragraph(extra_title or "", styles['Title']), extra_t]
+        for page in (extra_pages or []):
+            page_df = page.get("df")
+            if page_df is None or page_df.empty:
+                continue
+            page_t = _build_grid_table_flowable(page_df, font_name, page.get("motto"))
+            flowables += [PageBreak(), Paragraph(page.get("title") or "", styles['Title']), page_t]
 
         doc.build(flowables)
 
@@ -1384,6 +1432,9 @@ if mode == "🚀 Generovať rozpis":
                         st.session_state[f"core_cap_rules_{doc}"] = []
                         st.session_state[f"core_lock_{doc}"] = False
                         st.session_state[f"core_force_ward_{doc}"] = False
+                        if doc in ("Miklatkova", "Kacurova"):
+                            st.session_state[f"core_force_rt_amb_{doc}"] = False
+                            st.session_state[f"core_force_rt_odd_{doc}"] = False
             if loaded_manual:
                 st.session_state.manual_core[start_d.strftime('%Y-%m-%d')] = loaded_manual
                 st.success(f"Načítané izby z posledného dňa predošlého cyklu ({prev_cycle_last_day_key}).")
@@ -1405,12 +1456,16 @@ if mode == "🚀 Generovať rozpis":
                 default_max = int(doc_manual.get("max_patients", 15) or 15)
                 default_lock = bool(doc_manual.get("locked_rooms", False))
                 default_force = bool(doc_manual.get("force_to_ward", False))
+                default_force_rt_amb = bool(doc_manual.get("force_rt_amb", False))
+                default_force_rt_odd = bool(doc_manual.get("force_rt_odd", False))
             else:
                 default_rooms = doc_manual if isinstance(doc_manual, list) else []
                 default_cap_rules = []
                 default_max = 15
                 default_lock = False
                 default_force = False
+                default_force_rt_amb = False
+                default_force_rt_odd = False
 
             if f"core_{doc}" not in st.session_state and default_rooms:
                 st.session_state[f"core_{doc}"] = ", ".join(str(x) for x in default_rooms)
@@ -1422,6 +1477,11 @@ if mode == "🚀 Generovať rozpis":
                 st.session_state[f"core_lock_{doc}"] = default_lock
             if f"core_force_ward_{doc}" not in st.session_state:
                 st.session_state[f"core_force_ward_{doc}"] = default_force
+            if doc in ("Miklatkova", "Kacurova"):
+                if f"core_force_rt_amb_{doc}" not in st.session_state:
+                    st.session_state[f"core_force_rt_amb_{doc}"] = default_force_rt_amb
+                if f"core_force_rt_odd_{doc}" not in st.session_state:
+                    st.session_state[f"core_force_rt_odd_{doc}"] = default_force_rt_odd
 
             c_rooms, c_max = st.columns(2)
             val = c_rooms.text_input(f"Dr {doc} – izby (napr. 1, 4):", key=f"core_{doc}")
@@ -1470,24 +1530,32 @@ if mode == "🚀 Generovať rozpis":
             cap_rules = st.session_state.get(f"core_cap_rules_{doc}", [])
             lock_rooms = st.checkbox(f"Dr {doc} – Zamknúť pridelené izby", key=f"core_lock_{doc}")
             force_ward = st.checkbox(f"Dr {doc} – Prideliť na oddelenie", key=f"core_force_ward_{doc}")
+            force_rt_amb = force_rt_odd = False
+            if doc in ("Miklatkova", "Kacurova"):
+                force_rt_amb = st.checkbox(f"Dr {doc} – Force RT amb", key=f"core_force_rt_amb_{doc}")
+                force_rt_odd = st.checkbox(f"Dr {doc} – Force RT odd", key=f"core_force_rt_odd_{doc}")
             if val.strip():
                 try:
                     parsed_rooms = [int(p.strip()) for p in val.split(',') if p.strip().isdigit()]
                     manual_core_input[doc] = {
                         "rooms": parsed_rooms,
                         "locked_rooms": bool(lock_rooms),
-                        "force_to_ward": bool(force_ward)
+                        "force_to_ward": bool(force_ward),
+                        "force_rt_amb": bool(force_rt_amb),
+                        "force_rt_odd": bool(force_rt_odd)
                     }
                     if cap_rules:
                         manual_core_input[doc]["max_patients_by_dates"] = cap_rules
                     else:
                         manual_core_input[doc]["max_patients"] = int(max_pat)
                 except: pass
-            elif int(max_pat) != 15 or bool(lock_rooms) or bool(force_ward) or bool(cap_rules):
+            elif int(max_pat) != 15 or bool(lock_rooms) or bool(force_ward) or bool(cap_rules) or bool(force_rt_amb) or bool(force_rt_odd):
                 manual_core_input[doc] = {
                     "rooms": [],
                     "locked_rooms": bool(lock_rooms),
-                    "force_to_ward": bool(force_ward)
+                    "force_to_ward": bool(force_ward),
+                    "force_rt_amb": bool(force_rt_amb),
+                    "force_rt_odd": bool(force_rt_odd)
                 }
                 if cap_rules:
                     manual_core_input[doc]["max_patients_by_dates"] = cap_rules
@@ -1517,6 +1585,19 @@ if mode == "🚀 Generovať rozpis":
             st.session_state.df_generated.columns = ["Sekcia / Dátum"] + ds
             st.session_state.absences_df = build_absence_table(ab, start_d)
             st.session_state.cievne_df = create_cievne_vstupy_df(ds, presence_grid)
+            st.session_state.extra_week_dfs = []
+
+            if any("Kohutek" in ab.get(dk, {}) for dk in raw_dates):
+                ab_wide = get_ical_events(
+                    datetime.combine(start_d, datetime.min.time()),
+                    datetime.combine(start_d + timedelta(weeks=9), datetime.min.time())
+                )
+                weeks_touched, week_starts = detect_kohutek_vacation_weeks(st.session_state.config, ab_wide, start_d)
+                st.session_state.kohutek_vacation_weeks_touched = weeks_touched
+                st.session_state.kohutek_vacation_week_starts = week_starts
+                st.session_state.kohutek_vacation_ab_wide = ab_wide
+            else:
+                st.session_state.kohutek_vacation_weeks_touched = 0
         st.success("Hotovo!")
     
     if scan_clicked:
@@ -1534,7 +1615,30 @@ if mode == "🚀 Generovať rozpis":
 
     if 'df_generated' in st.session_state:
         st.markdown("---")
-        
+
+        # --- SEKCIA: DOVOLENKA DR. KOHÚTKA CEZ VIAC TÝŽDŇOV ---
+        weeks_touched = st.session_state.get('kohutek_vacation_weeks_touched', 0)
+        if weeks_touched > 1:
+            st.warning(f"⚠️ Dr. Kohútek má dovolenku, ktorá zasahuje do {weeks_touched} týždňových cyklov rozpisu (aktuálny týždeň + {weeks_touched - 1} ďalšie).")
+            if st.button(f"📅 Vygenerovať rozpisy aj pre zvyšné týždne ({weeks_touched - 1} navyše)"):
+                ab_wide = st.session_state.get('kohutek_vacation_ab_wide', {})
+                extra_dfs = []
+                for wk_start in st.session_state.kohutek_vacation_week_starts[1:]:
+                    wk_days = [wk_start + timedelta(days=i) for i in range(7) if (wk_start + timedelta(days=i)).weekday() < 5]
+                    wk_hols = get_holidays_in_range(wk_days[0], wk_days[-1]) if wk_days else {}
+                    wk_hols_extra = {hd.strftime('%Y-%m-%d'): ["ODDELENIE (Celé)"] for hd in wk_hols}
+                    ds_i, g_i, d_i, di_i, raw_dates_i, _ = generate_data_structure(st.session_state.config, ab_wide, wk_start, extra_closures=wk_hols_extra)
+                    df_i = create_display_df(ds_i, g_i, d_i, di_i, st.session_state.motto, st.session_state.config)
+                    df_i.columns = ["Sekcia / Dátum"] + ds_i
+                    rs, re_ = _get_schedule_range_labels(df_i)
+                    extra_dfs.append({"range": f"{rs} - {re_}", "df": df_i})
+                st.session_state.extra_week_dfs = extra_dfs
+                st.success(f"Vygenerovaných {len(extra_dfs)} dodatočných týždňov.")
+
+        for wk in st.session_state.get('extra_week_dfs', []):
+            with st.expander(f"📅 Rozpis {wk['range']}"):
+                st.dataframe(wk['df'], use_container_width=True, hide_index=True)
+
         # --- SEKCE PRE ABSENCIE ---
         if 'absences_df' in st.session_state and not st.session_state.absences_df.empty:
             with st.expander("📋 Prehľad neprítomností (Dovolenky, PN, Stáže)", expanded=True):
@@ -1623,9 +1727,18 @@ if mode == "🚀 Generovať rozpis":
         with st.expander("📧 Email - Hlavný rozpis"):
             to = st.text_input("Komu (Rozpis):", st.session_state.config['email_settings']['default_to'])
             attach_cievne = st.checkbox("💉 Priložiť aj tabuľku dostupnosti cievnych vstupov", value=True, key="attach_cievne_vstupy")
+            extra_week_dfs = st.session_state.get('extra_week_dfs', [])
+            if extra_week_dfs:
+                st.caption(f"📅 K emailu bude priložených aj {len(extra_week_dfs)} ďalších týždňov (dovolenka Dr. Kohútka).")
             if st.button("Odoslať Rozpis"):
+                extra_pages = [
+                    {"df": wk["df"], "title": f"Rozpis {wk['range']}", "motto": st.session_state.motto}
+                    for wk in extra_week_dfs
+                ]
                 cievne_df = st.session_state.get('cievne_df') if attach_cievne else None
-                pdf_to_send = create_pdf_report(export_df, st.session_state.motto, extra_df=cievne_df, extra_title="Dostupnosť cievnych vstupov")
+                if cievne_df is not None:
+                    extra_pages.append({"df": cievne_df, "title": "Dostupnosť cievnych vstupov"})
+                pdf_to_send = create_pdf_report(export_df, st.session_state.motto, extra_pages=extra_pages)
                 ok, err = send_email_with_pdf(pdf_to_send, f"{fn}.pdf", to, st.session_state.config['email_settings']['default_subject'], st.session_state.config['email_settings']['default_body'])
                 if ok:
                     st.success(f"Rozpis odoslaný na {to}")
