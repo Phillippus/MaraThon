@@ -21,7 +21,7 @@ import unicodedata
 # --- REPORTLAB PRE PDF + UNICODE ---
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
@@ -1070,7 +1070,39 @@ def create_excel_report(df):
         for i in range(2, len(df.columns) + 1): ws.column_dimensions[get_column_letter(i)].width = 18
     return output.getvalue()
 
-def create_pdf_report(df, motto, title_prefix="Rozpis prác"):
+def _build_grid_table_flowable(df, font_name, motto=None):
+    styles = getSampleStyleSheet()
+    cell_style = ParagraphStyle('C', parent=styles['Normal'], fontName=font_name, fontSize=7, leading=8, alignment=1)
+    section_headers = {"Oddelenie", "Konziliárna amb", "RT ambulancie", "Chemo amb", "Disp. Ambulancia", "RTG Terapia"}
+    data = [[Paragraph(str(c), ParagraphStyle('H', parent=styles['Normal'], fontName=font_name, fontSize=8, alignment=1)) for c in df.columns]]
+    for _, row in df.iterrows():
+        row_data = []
+        first_cell = str(row.iloc[0]) if len(row) else ""
+        is_motto = first_cell == (motto or "Motto")
+        for i, val in enumerate(row.values):
+            txt = str(val) if val else ""
+            if is_motto and i==0:
+                p = Paragraph(f"<para align='center'><b><i>{txt}</i></b></para>", ParagraphStyle('M', parent=cell_style, fontSize=9, padding=6, alignment=1))
+            elif is_motto: p = ""
+            elif i==0: p = Paragraph(f"<b>{txt}</b>", cell_style)
+            else: p = Paragraph(txt, cell_style)
+            row_data.append(p)
+        data.append(row_data)
+
+    t = Table(data, colWidths=[130] + [135]*(len(df.columns)-1))
+    style = TableStyle([('GRID', (0,0), (-1,-1), 0.5, colors.black), ('VALIGN', (0,0), (-1,-1), 'MIDDLE'), ('BACKGROUND', (0,0), (-1,0), colors.grey)])
+    for i, (_, row) in enumerate(df.iterrows()):
+        first_cell = str(row.iloc[0]) if len(row) else ""
+        if first_cell in section_headers:
+            style.add('BACKGROUND', (0, i+1), (-1, i+1), colors.lightgrey)
+        if first_cell == (motto or "Motto"):
+            style.add('SPAN', (0, i+1), (-1, i+1))
+            style.add('BACKGROUND', (0, i+1), (-1, i+1), colors.whitesmoke)
+            style.add('ALIGN', (0, i+1), (-1, i+1), 'CENTER')
+    t.setStyle(style)
+    return t
+
+def create_pdf_report(df, motto, title_prefix="Rozpis prác", extra_df=None, extra_title=None):
     buffer = io.BytesIO()
     font_name = setup_pdf_fonts()
     range_start, range_end = _get_schedule_range_labels(df)
@@ -1079,7 +1111,7 @@ def create_pdf_report(df, motto, title_prefix="Rozpis prác"):
     styles['Title'].fontName = font_name
     styles['Normal'].fontName = font_name
     cell_style = ParagraphStyle('C', parent=styles['Normal'], fontName=font_name, fontSize=7, leading=8, alignment=1)
-    
+
     # Pre absencie pouzivame inu strukturu, pre rozpis inu
     # Ak je to absencna tabulka, je jednoduchsia
     if "Od - Do" in df.columns:
@@ -1108,36 +1140,15 @@ def create_pdf_report(df, motto, title_prefix="Rozpis prác"):
         
     else:
         # Klasicky rozpis
-        data = [[Paragraph(str(c), ParagraphStyle('H', parent=styles['Normal'], fontName=font_name, fontSize=8, alignment=1)) for c in df.columns]]
-        section_headers = {"Oddelenie", "Konziliárna amb", "RT ambulancie", "Chemo amb", "Disp. Ambulancia", "RTG Terapia"}
-        for _, row in df.iterrows():
-            row_data = []
-            first_cell = str(row.iloc[0]) if len(row) else ""
-            is_motto = first_cell == (motto or "Motto")
-            for i, val in enumerate(row.values):
-                txt = str(val) if val else ""
-                if is_motto and i==0: 
-                    p = Paragraph(f"<para align='center'><b><i>{txt}</i></b></para>", ParagraphStyle('M', parent=cell_style, fontSize=9, padding=6, alignment=1))
-                elif is_motto: p = ""
-                elif i==0: p = Paragraph(f"<b>{txt}</b>", cell_style)
-                else: p = Paragraph(txt, cell_style)
-                row_data.append(p)
-            data.append(row_data)
-        
-        t = Table(data, colWidths=[130] + [135]*(len(df.columns)-1))
-        style = TableStyle([('GRID', (0,0), (-1,-1), 0.5, colors.black), ('VALIGN', (0,0), (-1,-1), 'MIDDLE'), ('BACKGROUND', (0,0), (-1,0), colors.grey)])
-        for i, (_, row) in enumerate(df.iterrows()):
-            first_cell = str(row.iloc[0]) if len(row) else ""
-            if first_cell in section_headers:
-                style.add('BACKGROUND', (0, i+1), (-1, i+1), colors.lightgrey)
-            if first_cell == (motto or "Motto"):
-                style.add('SPAN', (0, i+1), (-1, i+1))
-                style.add('BACKGROUND', (0, i+1), (-1, i+1), colors.whitesmoke)
-                style.add('ALIGN', (0, i+1), (-1, i+1), 'CENTER')
-        t.setStyle(style)
-        
-        doc.build([Paragraph(f"{title_prefix} {range_start} - {range_end}", styles['Title']), t])
-        
+        t = _build_grid_table_flowable(df, font_name, motto)
+        flowables = [Paragraph(f"{title_prefix} {range_start} - {range_end}", styles['Title']), t]
+
+        if extra_df is not None and not extra_df.empty:
+            extra_t = _build_grid_table_flowable(extra_df, font_name)
+            flowables += [PageBreak(), Paragraph(extra_title or "", styles['Title']), extra_t]
+
+        doc.build(flowables)
+
     buffer.seek(0)
     return buffer.getvalue()
 
@@ -1611,8 +1622,11 @@ if mode == "🚀 Generovať rozpis":
         # Samostatne odosielanie pre hlavny rozpis
         with st.expander("📧 Email - Hlavný rozpis"):
             to = st.text_input("Komu (Rozpis):", st.session_state.config['email_settings']['default_to'])
+            attach_cievne = st.checkbox("💉 Priložiť aj tabuľku dostupnosti cievnych vstupov", value=True, key="attach_cievne_vstupy")
             if st.button("Odoslať Rozpis"):
-                ok, err = send_email_with_pdf(pdf, f"{fn}.pdf", to, st.session_state.config['email_settings']['default_subject'], st.session_state.config['email_settings']['default_body'])
+                cievne_df = st.session_state.get('cievne_df') if attach_cievne else None
+                pdf_to_send = create_pdf_report(export_df, st.session_state.motto, extra_df=cievne_df, extra_title="Dostupnosť cievnych vstupov")
+                ok, err = send_email_with_pdf(pdf_to_send, f"{fn}.pdf", to, st.session_state.config['email_settings']['default_subject'], st.session_state.config['email_settings']['default_body'])
                 if ok:
                     st.success(f"Rozpis odoslaný na {to}")
                 else:
