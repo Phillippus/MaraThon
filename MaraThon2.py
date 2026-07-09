@@ -993,7 +993,7 @@ def create_cievne_vstupy_df(dates, presence_grid):
         row = [procedure]
         for date in dates:
             present_docs = presence_grid.get(date, set())
-            row.append("✅" if _cievny_vstup_dostupny(procedure, present_docs) else "❌")
+            row.append("✓" if _cievny_vstup_dostupny(procedure, present_docs) else "✗")
         rows.append(row)
     return pd.DataFrame(rows, columns=["Cievny vstup"] + dates)
 
