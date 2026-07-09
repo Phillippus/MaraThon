@@ -779,6 +779,7 @@ def generate_data_structure(config, absences, start_date, save_hist=True, extra_
     weekday = start_date.weekday()
     week_anchor = start_date + timedelta(days=(week_start_day - weekday) % 7)
     dates, data_grid = [], {}
+    presence_grid = {}
     all_doctors, doctors_info = [], {}
     week_dates_str = []
     for i in range(7):
@@ -835,6 +836,7 @@ def generate_data_structure(config, absences, start_date, save_hist=True, extra_
             and d not in day_absences
             and day_name not in config['lekari'][d].get('nepracuje', [])
         ]
+        presence_grid[date_str] = set(available)
         assigned_amb = {}
         
         for doc in list(available):
@@ -970,7 +972,30 @@ def generate_data_structure(config, absences, start_date, save_hist=True, extra_
                 
     if save_hist:
         save_history(history)
-    return dates, data_grid, all_doctors, doctors_info, dates_raw
+    return dates, data_grid, all_doctors, doctors_info, dates_raw, presence_grid
+
+CIEVNE_VSTUPY_ELIGIBLE = {
+    "PICC": ["Hunakova", "Vidulin", "Kohutek", "Bystricky"],
+    "Port": ["Bystricky", "Kohutek"],
+    "PICC port": ["Bystricky", "Kohutek"],
+}
+
+def _cievny_vstup_dostupny(procedure, present_docs):
+    """Cievny vstup robia dvaja lekári z eligible zoznamu; výnimka: PICC vie spraviť Kohútek sám."""
+    eligible_present = [d for d in CIEVNE_VSTUPY_ELIGIBLE[procedure] if d in present_docs]
+    if procedure == "PICC" and "Kohutek" in eligible_present:
+        return True
+    return len(eligible_present) >= 2
+
+def create_cievne_vstupy_df(dates, presence_grid):
+    rows = []
+    for procedure in CIEVNE_VSTUPY_ELIGIBLE:
+        row = [procedure]
+        for date in dates:
+            present_docs = presence_grid.get(date, set())
+            row.append("✅" if _cievny_vstup_dostupny(procedure, present_docs) else "❌")
+        rows.append(row)
+    return pd.DataFrame(rows, columns=["Cievny vstup"] + dates)
 
 def scan_future_problems(config, weeks_ahead=12):
     problems = []
@@ -980,7 +1005,7 @@ def scan_future_problems(config, weeks_ahead=12):
     closures = config.get('closures', {})
     current = start
     while current <= end:
-        dates, grid, docs, info, _ = generate_data_structure(config, absences, current, save_hist=False)
+        dates, grid, docs, info, _, _ = generate_data_structure(config, absences, current, save_hist=False)
         for date_str in dates:
             date_obj = datetime.strptime(date_str, '%d.%m.%Y')
             date_key = date_obj.strftime('%Y-%m-%d')
@@ -1475,11 +1500,12 @@ if mode == "🚀 Generovať rozpis":
             for _hd in _hols:
                 if not st.session_state.get(f"hol_work_{_hd}", False):
                     _hols_extra[_hd.strftime('%Y-%m-%d')] = ["ODDELENIE (Celé)"]
-            ds, g, d, di, raw_dates = generate_data_structure(st.session_state.config, ab, start_d, extra_closures=_hols_extra)
+            ds, g, d, di, raw_dates, presence_grid = generate_data_structure(st.session_state.config, ab, start_d, extra_closures=_hols_extra)
             st.session_state.dates_raw = raw_dates
             st.session_state.df_generated = create_display_df(ds, g, d, di, st.session_state.motto, st.session_state.config)
             st.session_state.df_generated.columns = ["Sekcia / Dátum"] + ds
             st.session_state.absences_df = build_absence_table(ab, start_d)
+            st.session_state.cievne_df = create_cievne_vstupy_df(ds, presence_grid)
         st.success("Hotovo!")
     
     if scan_clicked:
@@ -1521,6 +1547,11 @@ if mode == "🚀 Generovať rozpis":
                         st.success(f"Absencie odoslané na {to_abs}")
                     else:
                         st.error(f"Chyba pri odosielaní absencií: {err}")
+
+        # --- SEKCE PRE CIEVNE VSTUPY ---
+        if 'cievne_df' in st.session_state:
+            with st.expander("💉 Dostupnosť cievnych vstupov", expanded=True):
+                st.dataframe(st.session_state.cievne_df, use_container_width=True, hide_index=True)
 
         # --- SEKCE PRE HLAVNY ROZPIS ---
         st.info("✏️ Tabuľku nižšie môžete priamo editovať. Zmeny sa prejavia v exportoch.")
