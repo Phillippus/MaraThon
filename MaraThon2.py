@@ -805,6 +805,7 @@ def generate_data_structure(config, absences, start_date, save_hist=True, extra_
     week_anchor = start_date + timedelta(days=(week_start_day - weekday) % 7)
     dates, data_grid = [], {}
     presence_grid = {}
+    busy_amb_grid = {}
     all_doctors, doctors_info = [], {}
     week_dates_str = []
     for i in range(7):
@@ -977,7 +978,8 @@ def generate_data_structure(config, absences, start_date, save_hist=True, extra_
             assigned_amb["Radio 2A"] = "---"
 
         for k, v in assigned_amb.items(): data_grid[date_str][k] = v
-        
+        busy_amb_grid[date_str] = {doc: amb for amb, doc in assigned_amb.items() if doc in all_doctors}
+
         wolf_doc = assigned_amb.get("Wolf")
         if "ODDELENIE (Celé)" in closed_today:
             room_text_map, room_raw_map = {}, {}
@@ -1017,7 +1019,7 @@ def generate_data_structure(config, absences, start_date, save_hist=True, extra_
                 
     if save_hist:
         save_history(history)
-    return dates, data_grid, all_doctors, doctors_info, dates_raw, presence_grid
+    return dates, data_grid, all_doctors, doctors_info, dates_raw, presence_grid, busy_amb_grid
 
 CIEVNE_VSTUPY_ELIGIBLE = {
     "PICC": ["Hunakova", "Vidulin", "Kohutek", "Bystricky"],
@@ -1025,20 +1027,43 @@ CIEVNE_VSTUPY_ELIGIBLE = {
     "PICC port": ["Bystricky", "Kohutek"],
 }
 
-def _cievny_vstup_dostupny(procedure, present_docs):
+def _cievny_vstup_rule_satisfied(procedure, pool):
     """Cievny vstup robia dvaja lekári z eligible zoznamu; výnimka: PICC vie spraviť Kohútek sám."""
-    eligible_present = [d for d in CIEVNE_VSTUPY_ELIGIBLE[procedure] if d in present_docs]
-    if procedure == "PICC" and "Kohutek" in eligible_present:
+    if procedure == "PICC" and "Kohutek" in pool:
         return True
-    return len(eligible_present) >= 2
+    return len(pool) >= 2
 
-def create_cievne_vstupy_df(dates, presence_grid):
+def _cievny_vstup_stav(procedure, present_docs, busy_docs):
+    """Tri stavy: Dostupné (voľní), Po dohovore (prítomní, ale niektorý na ambulancii,
+    alebo pri Porte/PICC porte chýba jeden z dvojice Bystrický+Kohútek), Nedostupné (nikto z eligible nie je v práci)."""
+    eligible = CIEVNE_VSTUPY_ELIGIBLE[procedure]
+    present_eligible = [d for d in eligible if d in present_docs]
+    free_eligible = [d for d in present_eligible if d not in busy_docs]
+    busy_eligible = [d for d in present_eligible if d in busy_docs]
+
+    if _cievny_vstup_rule_satisfied(procedure, free_eligible):
+        return "Dostupné"
+
+    blocking_ambs = sorted({busy_docs[d] for d in busy_eligible})
+    suffix = f" ({', '.join(blocking_ambs)})" if blocking_ambs else ""
+
+    # Port/PICC port vie Bystrický s Kohútkom dohodnúť aj mimo bežnej dostupnosti - nikdy "Nedostupné".
+    if procedure in ("Port", "PICC port"):
+        return f"Po dohovore{suffix}"
+
+    if _cievny_vstup_rule_satisfied(procedure, present_eligible):
+        return f"Po dohovore{suffix}"
+
+    return "Nedostupné"
+
+def create_cievne_vstupy_df(dates, presence_grid, busy_amb_grid):
     rows = []
     for procedure in CIEVNE_VSTUPY_ELIGIBLE:
         row = [procedure]
         for date in dates:
             present_docs = presence_grid.get(date, set())
-            row.append("✓" if _cievny_vstup_dostupny(procedure, present_docs) else "✗")
+            busy_docs = busy_amb_grid.get(date, {})
+            row.append(_cievny_vstup_stav(procedure, present_docs, busy_docs))
         rows.append(row)
     return pd.DataFrame(rows, columns=["Cievny vstup"] + dates)
 
@@ -1050,7 +1075,7 @@ def scan_future_problems(config, weeks_ahead=12):
     closures = config.get('closures', {})
     current = start
     while current <= end:
-        dates, grid, docs, info, _, _ = generate_data_structure(config, absences, current, save_hist=False)
+        dates, grid, docs, info, _, _, _ = generate_data_structure(config, absences, current, save_hist=False)
         for date_str in dates:
             date_obj = datetime.strptime(date_str, '%d.%m.%Y')
             date_key = date_obj.strftime('%Y-%m-%d')
@@ -1573,18 +1598,29 @@ if mode == "🚀 Generovať rozpis":
 
     if gen_clicked:
         with st.spinner("..."):
-            end_d = start_d + timedelta(days=14)
+            end_d = start_d + timedelta(days=21)
             ab = get_ical_events(datetime.combine(start_d, datetime.min.time()), datetime.combine(end_d, datetime.min.time()))
             _hols_extra = {}
             for _hd in _hols:
                 if not st.session_state.get(f"hol_work_{_hd}", False):
                     _hols_extra[_hd.strftime('%Y-%m-%d')] = ["ODDELENIE (Celé)"]
-            ds, g, d, di, raw_dates, presence_grid = generate_data_structure(st.session_state.config, ab, start_d, extra_closures=_hols_extra)
+            ds, g, d, di, raw_dates, presence_grid, busy_grid = generate_data_structure(st.session_state.config, ab, start_d, extra_closures=_hols_extra)
             st.session_state.dates_raw = raw_dates
             st.session_state.df_generated = create_display_df(ds, g, d, di, st.session_state.motto, st.session_state.config)
             st.session_state.df_generated.columns = ["Sekcia / Dátum"] + ds
             st.session_state.absences_df = build_absence_table(ab, start_d)
-            st.session_state.cievne_df = create_cievne_vstupy_df(ds, presence_grid)
+
+            # Dostupnosť cievnych vstupov vždy na 2 týždne dopredu, nezávisle od dĺžky rozpisu.
+            week2_start = start_d + timedelta(weeks=1)
+            week2_days = [week2_start + timedelta(days=i) for i in range(7) if (week2_start + timedelta(days=i)).weekday() < 5]
+            week2_hols = get_holidays_in_range(week2_days[0], week2_days[-1]) if week2_days else {}
+            week2_hols_extra = {hd.strftime('%Y-%m-%d'): ["ODDELENIE (Celé)"] for hd in week2_hols}
+            ds2, g2, d2, di2, raw_dates2, presence_grid2, busy_grid2 = generate_data_structure(
+                st.session_state.config, ab, week2_start, save_hist=False, extra_closures=week2_hols_extra
+            )
+            st.session_state.cievne_df = create_cievne_vstupy_df(
+                ds + ds2, {**presence_grid, **presence_grid2}, {**busy_grid, **busy_grid2}
+            )
             st.session_state.extra_week_dfs = []
 
             if any("Kohutek" in ab.get(dk, {}) for dk in raw_dates):
@@ -1627,7 +1663,7 @@ if mode == "🚀 Generovať rozpis":
                     wk_days = [wk_start + timedelta(days=i) for i in range(7) if (wk_start + timedelta(days=i)).weekday() < 5]
                     wk_hols = get_holidays_in_range(wk_days[0], wk_days[-1]) if wk_days else {}
                     wk_hols_extra = {hd.strftime('%Y-%m-%d'): ["ODDELENIE (Celé)"] for hd in wk_hols}
-                    ds_i, g_i, d_i, di_i, raw_dates_i, _ = generate_data_structure(st.session_state.config, ab_wide, wk_start, extra_closures=wk_hols_extra)
+                    ds_i, g_i, d_i, di_i, raw_dates_i, _, _ = generate_data_structure(st.session_state.config, ab_wide, wk_start, extra_closures=wk_hols_extra)
                     df_i = create_display_df(ds_i, g_i, d_i, di_i, st.session_state.motto, st.session_state.config)
                     df_i.columns = ["Sekcia / Dátum"] + ds_i
                     rs, re_ = _get_schedule_range_labels(df_i)
