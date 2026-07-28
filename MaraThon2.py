@@ -218,6 +218,15 @@ def load_config():
             _vd_prio[si], _vd_prio[vi] = _vd_prio[vi], _vd_prio[si]
             changed = True
 
+    # Dr Kurisová musí byť spôsobilá kandidátka na Veľký dispenzár (chýbalo v starších configoch)
+    if isinstance(_vd_prio, list) and 'Kurisova' not in _vd_prio:
+        _vd_prio.append('Kurisova')
+        changed = True
+    _kurisova = config.get('lekari', {}).get('Kurisova')
+    if _kurisova is not None and 'Velka dispenzarna' not in _kurisova.get('moze', []):
+        _kurisova.setdefault('moze', []).append('Velka dispenzarna')
+        changed = True
+
     # Email default
     if not config.get('email_settings', {}).get('default_to', ''):
         config.setdefault('email_settings', {})['default_to'] = 'filip.kohutek@fntn.sk'
@@ -1021,51 +1030,64 @@ def generate_data_structure(config, absences, start_date, save_hist=True, extra_
         save_history(history)
     return dates, data_grid, all_doctors, doctors_info, dates_raw, presence_grid, busy_amb_grid
 
-CIEVNE_VSTUPY_ELIGIBLE = {
-    "PICC": ["Hunakova", "Vidulin", "Kohutek", "Bystricky"],
-    "Port": ["Bystricky", "Kohutek"],
-    "PICC port": ["Bystricky", "Kohutek"],
-}
+CIEVNE_VSTUPY_ROWS = ["PICC", "Port", "PICC port"]
 
-def _cievny_vstup_rule_satisfied(procedure, pool):
-    """Cievny vstup robia dvaja lekári z eligible zoznamu; výnimka: PICC vie spraviť Kohútek sám."""
-    if procedure == "PICC" and "Kohutek" in pool:
-        return True
-    return len(pool) >= 2
+def _cievne_vstupy_stav(present_docs, busy_docs):
+    """Vyhodnotí dostupnosť PICC a portu na daný deň podľa pevných pravidiel (prvé
+    vyhovujúce pravidlo platí, v poradí 5, 1, 2, 3, 4). Vracia (picc_stav, port_stav)."""
+    b_praca = "Bystricky" in present_docs
+    k_praca = "Kohutek" in present_docs
+    v_praca = "Vidulin" in present_docs
+    b_amb = "Bystricky" in busy_docs
+    k_amb = "Kohutek" in busy_docs
+    v_amb = v_praca and "Vidulin" in busy_docs
+    v_odd = v_praca and not v_amb
+    h_odd = "Hunakova" in present_docs and "Hunakova" not in busy_docs
 
-def _cievny_vstup_stav(procedure, present_docs, busy_docs):
-    """Tri stavy: Dostupné (voľní), Po dohovore (prítomní, ale niektorý na ambulancii,
-    alebo pri Porte/PICC porte chýba jeden z dvojice Bystrický+Kohútek), Nedostupné (nikto z eligible nie je v práci)."""
-    eligible = CIEVNE_VSTUPY_ELIGIBLE[procedure]
-    present_eligible = [d for d in eligible if d in present_docs]
-    free_eligible = [d for d in present_eligible if d not in busy_docs]
-    busy_eligible = [d for d in present_eligible if d in busy_docs]
+    # Pravidlo 5 (najvyššia priorita – úplná nedostupnosť)
+    if not b_praca and not k_praca and not v_praca:
+        return "Nedostupný", "Nedostupný"
 
-    if _cievny_vstup_rule_satisfied(procedure, free_eligible):
-        return "Dostupné"
+    # Pravidlo 1
+    if (b_praca or k_praca) and not b_amb and not k_amb and h_odd and v_odd:
+        return "Dostupný", "Dostupný"
 
-    blocking_ambs = sorted({busy_docs[d] for d in busy_eligible})
-    suffix = f" ({', '.join(blocking_ambs)})" if blocking_ambs else ""
+    # Pravidlo 2
+    if b_amb and k_amb and h_odd and v_odd:
+        return "Dostupný", "Po dohovore"
 
-    # Port/PICC port vie Bystrický s Kohútkom dohodnúť aj mimo bežnej dostupnosti - nikdy "Nedostupné".
-    if procedure in ("Port", "PICC port"):
-        return f"Po dohovore{suffix}"
+    # Pravidlo 3
+    if (b_amb or k_amb) and v_amb and h_odd:
+        return "Po dohovore", "Po dohovore"
 
-    if _cievny_vstup_rule_satisfied(procedure, present_eligible):
-        return f"Po dohovore{suffix}"
+    # Pravidlo 4 (ani Bystrický, ani Kohútek nie sú v práci)
+    if not b_praca and not k_praca:
+        if h_odd and v_odd:
+            picc = "Dostupný"
+        elif v_amb and h_odd:
+            picc = "Po dohovore"
+        else:
+            picc = "Nedostupný"
+        return picc, "Nedostupný"
 
-    return "Nedostupné"
+    # Nepokrytá kombinácia – bezpečný default, treba skontrolovať manuálne.
+    logger.warning(
+        "Cievne vstupy: nepokrytá kombinácia b_praca=%s k_praca=%s b_amb=%s k_amb=%s "
+        "h_odd=%s v_odd=%s v_amb=%s v_praca=%s",
+        b_praca, k_praca, b_amb, k_amb, h_odd, v_odd, v_amb, v_praca,
+    )
+    return "Nedostupný", "Nedostupný"
 
 def create_cievne_vstupy_df(dates, presence_grid, busy_amb_grid):
-    rows = []
-    for procedure in CIEVNE_VSTUPY_ELIGIBLE:
-        row = [procedure]
-        for date in dates:
-            present_docs = presence_grid.get(date, set())
-            busy_docs = busy_amb_grid.get(date, {})
-            row.append(_cievny_vstup_stav(procedure, present_docs, busy_docs))
-        rows.append(row)
-    return pd.DataFrame(rows, columns=["Cievny vstup"] + dates)
+    rows = {name: [name] for name in CIEVNE_VSTUPY_ROWS}
+    for date in dates:
+        present_docs = presence_grid.get(date, set())
+        busy_docs = busy_amb_grid.get(date, {})
+        picc_stav, port_stav = _cievne_vstupy_stav(present_docs, busy_docs)
+        rows["PICC"].append(picc_stav)
+        rows["Port"].append(port_stav)
+        rows["PICC port"].append(port_stav)
+    return pd.DataFrame(rows.values(), columns=["Cievny vstup"] + dates)
 
 def scan_future_problems(config, weeks_ahead=12):
     problems = []

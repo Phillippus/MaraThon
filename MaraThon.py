@@ -116,6 +116,15 @@ def load_config():
             _vd_prio[si], _vd_prio[vi] = _vd_prio[vi], _vd_prio[si]
             changed = True
 
+    # Dr Kurisová musí byť spôsobilá kandidátka na Veľký dispenzár (chýbalo v starších configoch)
+    if isinstance(_vd_prio, list) and 'Kurisova' not in _vd_prio:
+        _vd_prio.append('Kurisova')
+        changed = True
+    _kurisova = config.get('lekari', {}).get('Kurisova')
+    if _kurisova is not None and 'Velka dispenzarna' not in _kurisova.get('moze', []):
+        _kurisova.setdefault('moze', []).append('Velka dispenzarna')
+        changed = True
+
     if changed:
         save_config(config)
     return config
