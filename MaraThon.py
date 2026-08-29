@@ -490,6 +490,11 @@ def get_ical_events(start_date, end_date):
             ).lower()
             if _raw_noaccent.startswith(('sluzi:', 'sluzby:', 'sluzba:')):
                 continue
+            if raw[:3] in ('INT', 'INP', 'GER') and len(raw) > 3 and raw[3].isupper():
+                # Krizove sluzby na internom/infekcnom/geriatrii (napr. "GERVidulin"),
+                # zapisane do zdielaneho kalendara od septembra 2026 - netykaju sa
+                # onkologickej ambulancie/dispenzara, nezapocitavat ako neprítomnost.
+                continue
 
             ev_start, ev_end = dt_start.date(), dt_end.date()
             if ev_end < start_date.date() or ev_start > end_date.date():
