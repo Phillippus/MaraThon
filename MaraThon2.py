@@ -42,6 +42,17 @@ GIST_FILENAME_HISTORY = "room_history_v26.json"
 REQUEST_TIMEOUT_SECONDS = 15
 logger = logging.getLogger(__name__)
 
+# Prípony za priezviskom v názve kalendárnej udalosti (get_ical_events) a čo
+# znamenajú — jediné miesto pravdy, aj pre legendu v sidebar UI.
+ABSENCIA_LEGENDA = [
+    ("(nič)", "Dovolenka", "Bežná dovolenka — priezvisko bez prípony."),
+    ("PN", "PN", "Práceneschopný/á."),
+    ("VZ", "VzZP", "Vzdelávanie zdravotníckych pracovníkov."),
+    ("OCR", "OCR", "Ošetrovanie člena rodiny."),
+    ("L", "L", "Lekár (iné pracovisko/dôvod)."),
+    ("S", "S", "Stáž."),
+]
+
 ROOMS_LIST = [
     (1, 3), (2, 3), (3, 3), (4, 3), (5, 3),
     (7, 1), (8, 3), (9, 3), (10, 1), (11, 1),
@@ -703,12 +714,23 @@ def get_ical_events(start_date, end_date):
             ev_start, ev_end = dt_start.date(), dt_end.date()
             if ev_end < start_date.date() or ev_start > end_date.date(): continue
             name, typ = raw, "Dovolenka"
-            if raw.upper().endswith('PN'): typ, name = "PN", raw[:-2].rstrip(' -')
-            elif raw.upper().endswith('VZ'): typ, name = "Vzdelávanie", raw[:-2].rstrip(' -')
-            elif raw.upper().endswith('S') and not raw.upper().endswith('OS'): typ, name = "Stáž", raw[:-1].rstrip(' -')
+            raw_upper = raw.upper()
+            # Rozpoznávané prípony za priezviskom (pozri ABSENCIA_LEGENDA nižšie
+            # pre plné významy zobrazené v aplikácii):
+            if raw_upper.endswith('PN'): typ, name = "PN", raw[:-2].rstrip(' -')
+            elif raw_upper.endswith('VZ'): typ, name = "VzZP", raw[:-2].rstrip(' -')
+            elif raw_upper.endswith('OCR'): typ, name = "OCR", raw[:-3].rstrip(' -')
+            elif raw_upper.endswith('S') and not raw_upper.endswith('OS'): typ, name = "S", raw[:-1].rstrip(' -')
+            elif raw_upper.endswith('L'): typ, name = "L", raw[:-1].rstrip(' -')
             elif '-' in raw and typ == "Dovolenka":
                 parts = raw.split('-')
                 name = parts[0].strip()
+                suffix = parts[1].strip().upper() if len(parts) > 1 else ""
+                if suffix == 'PN': typ = "PN"
+                elif suffix == 'VZ': typ = "VzZP"
+                elif suffix == 'OCR': typ = "OCR"
+                elif suffix == 'S': typ = "S"
+                elif suffix == 'L': typ = "L"
             # All-day events (no 'T' in DTSTART) have an exclusive DTEND per RFC 5545.
             # Timed events have DTEND on the same calendar day, so the loop must be inclusive.
             is_all_day = "T" not in event.get("DTSTART", "")
@@ -1397,6 +1419,11 @@ if 'temp_exceptions' not in st.session_state: st.session_state.temp_exceptions =
 if 'motto' not in st.session_state: st.session_state.motto = ""
 
 mode = st.sidebar.radio("Navigácia", ["🚀 Generovať rozpis", "⚙️ Nastavenia lekárov", "🏥 Nastavenia ambulancií", "📧 Nastavenia Emailu"])
+
+with st.sidebar.expander("❓ Skratky absencií v kalendári"):
+    st.caption("Prípona sa píše priamo za priezvisko v názve udalosti (napr. „KacurovaPN“, „Kohutek-OCR“).")
+    for skratka, zobrazenie, vyznam in ABSENCIA_LEGENDA:
+        st.markdown(f"**{skratka}** → *{vyznam}*" + (f"  (v rozpise: „{zobrazenie}“)" if zobrazenie != skratka else ""))
 
 if mode == "🚀 Generovať rozpis":
     c1, c2 = st.columns(2)
