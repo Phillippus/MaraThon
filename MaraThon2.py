@@ -49,6 +49,7 @@ ABSENCIA_LEGENDA = [
     ("PN", "PN", "Práceneschopný/á."),
     ("VZ", "VzZP", "Vzdelávanie zdravotníckych pracovníkov."),
     ("OCR", "OCR", "Ošetrovanie člena rodiny."),
+    ("SL", "SL", "Sprievod lekárovi."),
     ("L", "L", "Lekár (iné pracovisko/dôvod)."),
     ("S", "S", "Stáž."),
 ]
@@ -720,6 +721,7 @@ def get_ical_events(start_date, end_date):
             if raw_upper.endswith('PN'): typ, name = "PN", raw[:-2].rstrip(' -')
             elif raw_upper.endswith('VZ'): typ, name = "VzZP", raw[:-2].rstrip(' -')
             elif raw_upper.endswith('OCR'): typ, name = "OCR", raw[:-3].rstrip(' -')
+            elif raw_upper.endswith('SL'): typ, name = "SL", raw[:-2].rstrip(' -')  # pred 'S' a 'L'
             elif raw_upper.endswith('S') and not raw_upper.endswith('OS'): typ, name = "S", raw[:-1].rstrip(' -')
             elif raw_upper.endswith('L'): typ, name = "L", raw[:-1].rstrip(' -')
             elif '-' in raw and typ == "Dovolenka":
@@ -729,6 +731,7 @@ def get_ical_events(start_date, end_date):
                 if suffix == 'PN': typ = "PN"
                 elif suffix == 'VZ': typ = "VzZP"
                 elif suffix == 'OCR': typ = "OCR"
+                elif suffix == 'SL': typ = "SL"
                 elif suffix == 'S': typ = "S"
                 elif suffix == 'L': typ = "L"
             # All-day events (no 'T' in DTSTART) have an exclusive DTEND per RFC 5545.
